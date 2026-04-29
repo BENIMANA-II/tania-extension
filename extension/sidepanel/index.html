@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tania</title>
+  <link rel="stylesheet" href="styles/panel.css">
+</head>
+<body>
+
+  <!-- ========== SPLASH LOADER ========== -->
+  <section id="view-loader" class="view view--loader">
+    <div class="loader">
+      <div class="loader__ring">
+        <div class="loader__circle"></div>
+        <div class="loader__circle"></div>
+        <div class="loader__circle"></div>
+        <img class="loader__icon" src="../icons/icon-128.png" alt="Tania">
+      </div>
+      <h1 class="loader__logo">Tania</h1>
+      <div class="loader__dots">
+        <span class="loader__dot"></span>
+        <span class="loader__dot"></span>
+        <span class="loader__dot"></span>
+      </div>
+      <p class="loader__credit"><svg class="spyder-icon" viewBox="0 0 24 24"><circle cx="12" cy="11" r="3"/><circle cx="12" cy="17" r="2"/><path d="M5 2l2.5 5M19 2l-2.5 5M2 9l4.5 2M22 9l-4.5 2M5 20l3-4M19 20l-3-4M8 22l1.5-5M16 22l-1.5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg> By <span class="spyder-brand">SPYDER</span> <svg class="spyder-icon" viewBox="0 0 24 24"><circle cx="12" cy="11" r="3"/><circle cx="12" cy="17" r="2"/><path d="M5 2l2.5 5M19 2l-2.5 5M2 9l4.5 2M22 9l-4.5 2M5 20l3-4M19 20l-3-4M8 22l1.5-5M16 22l-1.5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg></p>
+    </div>
+  </section>
+
+  <!-- ========== AUTH VIEW ========== -->
+  <section id="view-login" class="view view--login" hidden>
+    <div class="login">
+      <img class="login__mark" src="../icons/icon-128.png" alt="Tania">
+      <h1 class="login__logo">Tania</h1>
+      <p class="login__tagline">Share with your circle</p>
+
+      <!-- Sign In Form -->
+      <form id="signin-form" class="login__form">
+        <div class="email-suggest-wrap">
+          <input
+            id="signin-identifier"
+            type="text"
+            class="input"
+            placeholder="Email or username"
+            required
+            autocomplete="off"
+          >
+          <ul id="signin-suggestions" class="email-suggest" hidden></ul>
+        </div>
+        <button type="submit" class="btn btn--primary" id="signin-btn">Sign in</button>
+        <p id="signin-error" class="form-error" hidden></p>
+        <p class="login__switch">Don't have an account? <button type="button" id="show-signup" class="login__switch-btn">Sign up</button></p>
+      </form>
+
+      <!-- Sign Up Form -->
+      <form id="signup-form" class="login__form" hidden>
+        <div class="email-suggest-wrap">
+          <input
+            id="signup-email"
+            type="email"
+            class="input"
+            placeholder="Email address"
+            required
+            autocomplete="off"
+          >
+          <ul id="signup-suggestions" class="email-suggest" hidden></ul>
+        </div>
+        <input
+          id="signup-username"
+          type="text"
+          class="input"
+          placeholder="Choose a username"
+          maxlength="30"
+          required
+          autocomplete="username"
+        >
+        <button type="submit" class="btn btn--primary" id="signup-btn">Sign up</button>
+        <p id="signup-error" class="form-error" hidden></p>
+        <p class="login__switch">Already have an account? <button type="button" id="show-signin" class="login__switch-btn">Sign in</button></p>
+      </form>
+
+    </div>
+  </section>
+
+  <!-- ========== MAIN APP VIEW ========== -->
+  <section id="view-app" class="view" hidden>
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header__brand">
+        <img class="header__icon" src="../icons/icon-48.png" alt="Tania">
+        <h1 class="header__logo">Tania</h1>
+        <p class="header__tagline">Share with your circle</p>
+      </div>
+    </header>
+
+    <!-- Error banner -->
+    <div id="error-banner" class="error-banner" hidden>
+      <svg class="error-banner__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <span id="error-banner-text" class="error-banner__text"></span>
+      <button id="error-banner-close" class="error-banner__close">&times;</button>
+    </div>
+
+    <!-- ===== INBOX VIEW ===== -->
+    <div id="view-inbox" class="view-content">
+      <section id="drop-zone" class="drop-zone">
+        <div class="drop-zone__content">
+          <svg class="drop-zone__icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          <p class="drop-zone__text">Drop a link to share</p>
+          <p class="drop-zone__hint">or paste a URL anywhere</p>
+        </div>
+      </section>
+
+      <section class="feed">
+        <div class="feed__header">
+          <h2 class="feed__title">Inbox</h2>
+        </div>
+        <div id="feed-loading" class="feed__loading" hidden>
+          <div class="spinner"></div>
+          <span>Loading...</span>
+        </div>
+        <ul id="feed-list" class="feed__list">
+          <li id="feed-empty" class="feed__empty-state">
+            <svg class="feed__empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
+              <path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/>
+            </svg>
+            <p class="feed__empty-title">Your inbox is empty</p>
+            <p class="feed__empty-text">Links shared by friends will appear here</p>
+          </li>
+        </ul>
+        <button id="feed-load-more" class="btn btn--ghost feed__load-more" hidden>Load more</button>
+      </section>
+    </div>
+
+    <!-- ===== SHARE DETAIL VIEW ===== -->
+    <div id="view-detail" class="view-content" hidden>
+      <button id="detail-back" class="detail__back" type="button">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        Back to Inbox
+      </button>
+      <div id="detail-content" class="detail__content"></div>
+    </div>
+
+    <!-- ===== SENT VIEW ===== -->
+    <div id="view-sent" class="view-content" hidden>
+      <section class="feed">
+        <div class="feed__header">
+          <h2 class="feed__title">Sent</h2>
+        </div>
+        <div id="sent-loading" class="feed__loading" hidden>
+          <div class="spinner"></div>
+          <span>Loading...</span>
+        </div>
+        <ul id="sent-list" class="feed__list">
+          <li id="sent-empty" class="feed__empty-state">
+            <svg class="feed__empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"/>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+            </svg>
+            <p class="feed__empty-title">Nothing sent yet</p>
+            <p class="feed__empty-text">Links you share will appear here</p>
+          </li>
+        </ul>
+        <button id="sent-load-more" class="btn btn--ghost feed__load-more" hidden>Load more</button>
+      </section>
+    </div>
+
+    <!-- ===== SENT DETAIL VIEW ===== -->
+    <div id="view-sent-detail" class="view-content" hidden>
+      <button id="sent-detail-back" class="detail__back" type="button">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        Back to Sent
+      </button>
+      <div id="sent-detail-content" class="detail__content"></div>
+    </div>
+
+    <!-- ===== FRIENDS VIEW ===== -->
+    <div id="view-friends" class="view-content" hidden>
+      <section class="friends-section">
+        <h2 class="section-title">Add a friend</h2>
+        <form id="invite-form" class="invite-form">
+          <div class="invite-input-wrap">
+            <input
+              id="invite-username"
+              type="text"
+              class="input"
+              placeholder="Search by username"
+              maxlength="30"
+              required
+              autocomplete="off"
+            >
+            <ul id="invite-search-results" class="invite-search-results" hidden></ul>
+          </div>
+          <button type="submit" class="btn btn--primary btn--sm" id="invite-btn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add
+          </button>
+        </form>
+        <p id="invite-status" class="invite-status" hidden></p>
+      </section>
+
+      <section id="pending-section" class="friends-section" hidden>
+        <h2 class="section-title">
+          Pending requests
+          <span id="pending-count" class="section-count section-count--warning"></span>
+        </h2>
+        <ul id="pending-list" class="friends-list"></ul>
+      </section>
+
+      <section id="outgoing-section" class="friends-section" hidden>
+        <h2 class="section-title">Sent requests</h2>
+        <ul id="outgoing-list" class="friends-list"></ul>
+      </section>
+
+      <section class="friends-section">
+        <h2 class="section-title">
+          Your friends
+          <span id="friends-count" class="section-count"></span>
+        </h2>
+        <input
+          id="friends-search"
+          type="text"
+          class="input friends-search"
+          placeholder="Search friends..."
+          autocomplete="off"
+          hidden
+        >
+        <div id="friends-loading" class="feed__loading" hidden>
+          <div class="spinner"></div>
+          <span>Loading...</span>
+        </div>
+        <ul id="friends-list" class="friends-list">
+          <li id="friends-empty" class="feed__empty-state">
+            <svg class="feed__empty-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 00-3-3.87"/>
+              <path d="M16 3.13a4 4 0 010 7.75"/>
+            </svg>
+            <p class="feed__empty-title">No friends yet</p>
+            <p class="feed__empty-text">Add a friend above to start sharing</p>
+          </li>
+        </ul>
+      </section>
+    </div>
+
+    <!-- ===== SETTINGS VIEW ===== -->
+    <div id="view-settings" class="view-content" hidden>
+      <section class="friends-section">
+        <h2 class="section-title">Account</h2>
+        <div class="settings-card">
+          <div class="settings-card__row">
+            <span class="settings-card__label">Username</span>
+            <span class="settings-card__value" id="settings-username"></span>
+            <button id="settings-edit-username" class="btn-icon" title="Edit username">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+            </button>
+          </div>
+          <form id="settings-username-form" class="settings-username-form" hidden>
+            <input id="settings-username-input" type="text" class="input" maxlength="30" placeholder="New username" autocomplete="off">
+            <div class="settings-username-form__actions">
+              <button type="submit" class="btn btn--primary btn--sm">Save</button>
+              <button type="button" id="settings-username-cancel" class="btn btn--ghost btn--sm">Cancel</button>
+            </div>
+            <p id="settings-username-error" class="form-error" hidden></p>
+          </form>
+          <div class="settings-card__row">
+            <span class="settings-card__label">Email</span>
+            <span class="settings-card__value" id="settings-email"></span>
+          </div>
+        </div>
+        <button id="settings-logout" class="btn btn--ghost btn--danger" style="width:100%;margin-top:14px">Sign out</button>
+      </section>
+
+      <section class="friends-section">
+        <h2 class="section-title">Appearance</h2>
+        <div class="settings-card">
+          <div class="settings-card__row">
+            <span class="settings-card__label">Theme</span>
+            <div class="theme-toggle" id="theme-toggle">
+              <button class="theme-toggle__btn" data-theme-choice="system" title="System">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              </button>
+              <button class="theme-toggle__btn" data-theme-choice="light" title="Light">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+              </button>
+              <button class="theme-toggle__btn" data-theme-choice="dark" title="Dark">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="friends-section">
+        <h2 class="section-title">Support</h2>
+        <div class="settings-card">
+          <a href="mailto:support@tania.app" class="settings-card__row settings-support-link">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            <span>Email us at support@tania.app</span>
+          </a>
+        </div>
+      </section>
+
+      <p class="settings-version">Tania v0.1.0</p>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <!-- Bottom nav -->
+    <nav class="nav">
+      <button class="nav__btn nav__btn--active" data-view="inbox">
+        <span class="nav__btn-icon-wrap">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
+            <path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/>
+          </svg>
+          <span id="nav-unread-badge" class="nav__badge" hidden></span>
+        </span>
+        Inbox
+      </button>
+      <button class="nav__btn" data-view="sent">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"/>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+        Sent
+      </button>
+      <button class="nav__btn" data-view="friends">
+        <span class="nav__btn-icon-wrap">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 00-3-3.87"/>
+            <path d="M16 3.13a4 4 0 010 7.75"/>
+          </svg>
+          <span id="nav-pending-badge" class="nav__badge" hidden></span>
+        </span>
+        Friends
+      </button>
+      <button class="nav__btn" data-view="settings">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+        Settings
+      </button>
+    </nav>
+  </section>
+
+  <!-- ========== FRIEND PICKER OVERLAY ========== -->
+  <div id="friend-picker" class="overlay" hidden>
+    <div class="picker">
+      <div class="picker__handle"></div>
+      <div class="picker__header">
+        <h3 class="picker__title">Share with...</h3>
+        <button id="picker-close" class="btn-icon">&times;</button>
+      </div>
+      <div id="picker-preview" class="picker__preview"></div>
+      <div id="picker-friends" class="picker__list">
+        <div class="feed__loading"><div class="spinner"></div><span>Loading friends...</span></div>
+      </div>
+      <div class="picker__footer">
+        <input
+          id="picker-note"
+          type="text"
+          class="input"
+          placeholder="Add a note (optional)"
+          maxlength="500"
+        >
+        <button id="picker-send" class="btn btn--primary" disabled>Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="index.js" type="module"></script>
+</body>
+</html>

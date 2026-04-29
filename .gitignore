@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Environment / secrets
+.env
+.env.local
+*.env
+!.env.example
+
+# Chrome extension signing key — NEVER commit this
+*.pem
+extension.pem
+
+# Build artifacts (the .crx is generated; keep the .zip release in /releases)
+*.crx
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local Claude Code workspace files
+.claude/
+
+# Not part of the public extension repo
+server/
+promo/
