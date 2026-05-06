@@ -38,15 +38,23 @@
       <form id="signin-form" class="login__form">
         <div class="email-suggest-wrap">
           <input
-            id="signin-identifier"
-            type="text"
+            id="signin-email"
+            type="email"
             class="input"
-            placeholder="Email or username"
+            placeholder="Email address"
             required
-            autocomplete="off"
+            autocomplete="email"
           >
           <ul id="signin-suggestions" class="email-suggest" hidden></ul>
         </div>
+        <input
+          id="signin-password"
+          type="password"
+          class="input"
+          placeholder="Password"
+          required
+          autocomplete="current-password"
+        >
         <button type="submit" class="btn btn--primary" id="signin-btn">Sign in</button>
         <p id="signin-error" class="form-error" hidden></p>
         <p class="login__switch">Don't have an account? <button type="button" id="show-signup" class="login__switch-btn">Sign up</button></p>
@@ -61,7 +69,7 @@
             class="input"
             placeholder="Email address"
             required
-            autocomplete="off"
+            autocomplete="email"
           >
           <ul id="signup-suggestions" class="email-suggest" hidden></ul>
         </div>
@@ -73,6 +81,15 @@
           maxlength="30"
           required
           autocomplete="username"
+        >
+        <input
+          id="signup-password"
+          type="password"
+          class="input"
+          placeholder="Choose a password (min 6 characters)"
+          minlength="6"
+          required
+          autocomplete="new-password"
         >
         <button type="submit" class="btn btn--primary" id="signup-btn">Sign up</button>
         <p id="signup-error" class="form-error" hidden></p>

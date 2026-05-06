@@ -54,19 +54,21 @@ const selectedFriends = new Set();
 
 // --- DOM: Auth ---
 
-const $loginView     = document.getElementById('view-login');
-const $appView       = document.getElementById('view-app');
-const $signinForm    = document.getElementById('signin-form');
-const $signinId      = document.getElementById('signin-identifier');
-const $signinBtn     = document.getElementById('signin-btn');
-const $signinError   = document.getElementById('signin-error');
-const $signupForm    = document.getElementById('signup-form');
-const $signupEmail   = document.getElementById('signup-email');
+const $loginView      = document.getElementById('view-login');
+const $appView        = document.getElementById('view-app');
+const $signinForm     = document.getElementById('signin-form');
+const $signinEmail    = document.getElementById('signin-email');
+const $signinPassword = document.getElementById('signin-password');
+const $signinBtn      = document.getElementById('signin-btn');
+const $signinError    = document.getElementById('signin-error');
+const $signupForm     = document.getElementById('signup-form');
+const $signupEmail    = document.getElementById('signup-email');
 const $signupUsername = document.getElementById('signup-username');
-const $signupBtn     = document.getElementById('signup-btn');
-const $signupError   = document.getElementById('signup-error');
-const $showSignup    = document.getElementById('show-signup');
-const $showSignin    = document.getElementById('show-signin');
+const $signupPassword = document.getElementById('signup-password');
+const $signupBtn      = document.getElementById('signup-btn');
+const $signupError    = document.getElementById('signup-error');
+const $showSignup     = document.getElementById('show-signup');
+const $showSignin     = document.getElementById('show-signin');
 
 // --- DOM: Shared ---
 
@@ -250,20 +252,18 @@ function setupSuggest(input, listEl, getItems) {
   });
 }
 
-// Sign-in: show both emails and usernames
+// Sign-in: emails only (Supabase Auth keys on email, not username)
 setupSuggest(
-  $signinId,
+  $signinEmail,
   document.getElementById('signin-suggestions'),
   (filter) => {
     const q = filter.toLowerCase();
     const seen = new Set();
     const out = [];
     for (const l of savedLoginsList) {
-      for (const val of [l.email, l.username]) {
-        if (val && !seen.has(val) && (!q || val.toLowerCase().includes(q))) {
-          seen.add(val);
-          out.push(val);
-        }
+      if (l.email && !seen.has(l.email) && (!q || l.email.toLowerCase().includes(q))) {
+        seen.add(l.email);
+        out.push(l.email);
       }
     }
     return out;
@@ -297,9 +297,11 @@ function showLogin() {
   // Reset auth forms to sign-in by default
   $signinForm.hidden = false;
   $signupForm.hidden = true;
-  $signinId.value = '';
+  $signinEmail.value = '';
+  $signinPassword.value = '';
   $signupEmail.value = '';
   $signupUsername.value = '';
+  $signupPassword.value = '';
   $signinError.hidden = true;
   $signupError.hidden = true;
 
@@ -371,7 +373,7 @@ $showSignin.addEventListener('click', () => {
   $signinForm.hidden = false;
   $signinError.hidden = true;
   $signupError.hidden = true;
-  $signinId.focus();
+  $signinEmail.focus();
 });
 
 // --- Sign In ---
@@ -383,8 +385,9 @@ $signinForm.addEventListener('submit', async (e) => {
   $signinBtn.textContent = 'Signing in...';
 
   try {
-    const result = await api.signin($signinId.value.trim());
-    await setAuth(result.token, result.user);
+    const email    = $signinEmail.value.trim();
+    const password = $signinPassword.value;
+    const result   = await api.signin(email, password);
     currentUser = result.user;
     saveLogin(result.user.email, result.user.username);
 
@@ -409,10 +412,10 @@ $signupForm.addEventListener('submit', async (e) => {
   $signupBtn.textContent = 'Creating account...';
 
   try {
-    const email = $signupEmail.value.trim();
+    const email    = $signupEmail.value.trim();
     const username = $signupUsername.value.trim();
-    const result = await api.signup(email, username);
-    await setAuth(result.token, result.user);
+    const password = $signupPassword.value;
+    const result   = await api.signup(email, username, password);
     currentUser = result.user;
     saveLogin(email, username);
 
@@ -456,9 +459,7 @@ $settingsUsernameForm.addEventListener('submit', async (e) => {
   try {
     $settingsUsernameError.hidden = true;
     const { user } = await api.updateUsername(newUsername);
-    currentUser.username = user.username;
-    const { token } = await getAuth();
-    await setAuth(token, user);
+    currentUser = user;
     $settingsUsername.textContent = user.username;
     $settingsUsernameForm.hidden = true;
     $settingsEditBtn.hidden = false;
