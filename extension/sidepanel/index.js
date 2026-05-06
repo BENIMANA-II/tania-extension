@@ -38,6 +38,25 @@ function initThemeToggle() {
 applyTheme();
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
 
+// --- Compact mode ---
+
+function applyCompact() {
+  const on = localStorage.getItem('tania-compact') === '1';
+  document.documentElement.setAttribute('data-compact', on ? 'true' : 'false');
+}
+
+function initCompactToggle() {
+  const $btn = document.getElementById('compact-toggle');
+  if (!$btn) return;
+  $btn.addEventListener('click', () => {
+    const next = localStorage.getItem('tania-compact') === '1' ? '0' : '1';
+    localStorage.setItem('tania-compact', next);
+    applyCompact();
+  });
+}
+
+applyCompact();
+
 import { api, getAuth, setAuth, clearAuth } from '../shared/api.js';
 import { extractUrl, isValidUrl, buildLinkPreview } from './lib/link-utils.js';
 
@@ -173,6 +192,7 @@ function hideLoader() {
 
 async function init() {
   initThemeToggle();
+  initCompactToggle();
   const { token, user } = await getAuth();
 
   await showLoader(5000);

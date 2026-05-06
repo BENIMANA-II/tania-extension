@@ -109,6 +109,12 @@
         <h1 class="header__logo">Tania</h1>
         <p class="header__tagline">Share with your circle</p>
       </div>
+      <button id="compact-toggle" class="header__compact-toggle" type="button" title="Toggle compact mode" aria-label="Toggle compact mode">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="11 17 6 12 11 7"/>
+          <polyline points="18 17 13 12 18 7"/>
+        </svg>
+      </button>
     </header>
 
     <!-- Error banner -->
@@ -340,14 +346,14 @@
           </svg>
           <span id="nav-unread-badge" class="nav__badge" hidden></span>
         </span>
-        Inbox
+        <span class="nav__btn-label">Inbox</span>
       </button>
       <button class="nav__btn" data-view="sent">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="22" y1="2" x2="11" y2="13"/>
           <polygon points="22 2 15 22 11 13 2 9 22 2"/>
         </svg>
-        Sent
+        <span class="nav__btn-label">Sent</span>
       </button>
       <button class="nav__btn" data-view="friends">
         <span class="nav__btn-icon-wrap">
@@ -359,14 +365,14 @@
           </svg>
           <span id="nav-pending-badge" class="nav__badge" hidden></span>
         </span>
-        Friends
+        <span class="nav__btn-label">Friends</span>
       </button>
       <button class="nav__btn" data-view="settings">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
           <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
         </svg>
-        Settings
+        <span class="nav__btn-label">Settings</span>
       </button>
     </nav>
   </section>
