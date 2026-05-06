@@ -114,6 +114,50 @@ revoke all on function public.are_friends(uuid, uuid) from public;
 grant execute on function public.are_friends(uuid, uuid) to authenticated;
 
 -- ---------------------------------------------------------------------------
+-- Helpers: share-membership checks (RLS-bypassing)
+-- ---------------------------------------------------------------------------
+-- Used inside RLS policies to break the otherwise-recursive cycle between
+-- `shares` and `share_recipients`. Without these, the shares SELECT policy
+-- would query share_recipients (which has its own SELECT policy that queries
+-- shares), triggering Postgres's "infinite recursion detected in policy"
+-- error the moment a recipient (non-sender) reads a share.
+--
+-- SECURITY DEFINER lets the function read both tables ignoring RLS; we still
+-- gate access by checking auth.uid() inside the function body.
+
+create or replace function public.is_share_sender(p_share_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1 from public.shares
+    where id = p_share_id and sender_id = auth.uid()
+  );
+$$;
+
+revoke all on function public.is_share_sender(uuid) from public;
+grant execute on function public.is_share_sender(uuid) to authenticated;
+
+create or replace function public.is_share_recipient(p_share_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1 from public.share_recipients
+    where share_id = p_share_id and recipient_id = auth.uid()
+  );
+$$;
+
+revoke all on function public.is_share_recipient(uuid) from public;
+grant execute on function public.is_share_recipient(uuid) to authenticated;
+
+-- ---------------------------------------------------------------------------
 -- Trigger: create a profile row when a new auth.users row is inserted
 -- ---------------------------------------------------------------------------
 -- The username is read from raw_user_meta_data.username, which the client
@@ -232,10 +276,7 @@ create policy shares_select_participant
   to authenticated
   using (
     sender_id = auth.uid()
-    or exists (
-      select 1 from public.share_recipients sr
-      where sr.share_id = shares.id and sr.recipient_id = auth.uid()
-    )
+    or public.is_share_recipient(id)
   );
 
 create policy shares_insert_as_sender
@@ -270,20 +311,14 @@ create policy share_recipients_select
   to authenticated
   using (
     recipient_id = auth.uid()
-    or exists (
-      select 1 from public.shares s
-      where s.id = share_recipients.share_id and s.sender_id = auth.uid()
-    )
+    or public.is_share_sender(share_id)
   );
 
 create policy share_recipients_insert_friend_only
   on public.share_recipients for insert
   to authenticated
   with check (
-    exists (
-      select 1 from public.shares s
-      where s.id = share_recipients.share_id and s.sender_id = auth.uid()
-    )
+    public.is_share_sender(share_id)
     and public.are_friends(auth.uid(), recipient_id)
   );
 
@@ -298,10 +333,7 @@ create policy share_recipients_delete_participant
   to authenticated
   using (
     recipient_id = auth.uid()
-    or exists (
-      select 1 from public.shares s
-      where s.id = share_recipients.share_id and s.sender_id = auth.uid()
-    )
+    or public.is_share_sender(share_id)
   );
 
 -- ---------------------------------------------------------------------------
