@@ -59,17 +59,20 @@ applyCompact();
 
 import { api, getAuth, setAuth, clearAuth } from '../shared/api.js';
 import { extractUrl, isValidUrl, buildLinkPreview } from './lib/link-utils.js';
+import { AVATAR_PRESETS, avatarHtml, colorForUser } from './lib/avatars.js';
 
 // --- State ---
 
 let currentUser = null;
-let feedCursor = null;
-let feedPollingId = null;
+let conversationsCache = [];
+let conversationsPollingId = null;
+let currentThread = null;
 let pendingLink = null;
 let unreadCount = 0;
 let pendingRequestCount = 0;
 let currentView = 'inbox';
 const selectedFriends = new Set();
+let selectedPickerGroupId = null;
 
 // --- DOM: Auth ---
 
@@ -100,27 +103,30 @@ const $navPending   = document.getElementById('nav-pending-badge');
 
 // --- DOM: Views ---
 
-const $viewInbox      = document.getElementById('view-inbox');
-const $viewSent       = document.getElementById('view-sent');
-const $viewSentDetail = document.getElementById('view-sent-detail');
-const $viewFriends    = document.getElementById('view-friends');
-const $viewSettings   = document.getElementById('view-settings');
+const $viewInbox     = document.getElementById('view-inbox');
+const $viewThread    = document.getElementById('view-thread');
+const $viewSaved     = document.getElementById('view-saved');
+const $viewFriends   = document.getElementById('view-friends');
+const $viewSettings  = document.getElementById('view-settings');
 
-// --- DOM: Inbox ---
+// --- DOM: Inbox (conversations) ---
 
-const $dropZone     = document.getElementById('drop-zone');
-const $dropText     = $dropZone.querySelector('.drop-zone__text');
-const $feedLoading  = document.getElementById('feed-loading');
-const $feedList     = document.getElementById('feed-list');
-const $loadMore     = document.getElementById('feed-load-more');
+const $dropZone           = document.getElementById('drop-zone');
+const $dropText           = $dropZone.querySelector('.drop-zone__text');
+const $conversationsLoading = document.getElementById('conversations-loading');
+const $conversationsList  = document.getElementById('conversations-list');
+const $conversationsSearch = document.getElementById('conversations-search');
+
+// --- DOM: Thread ---
+
+const $threadBack      = document.getElementById('thread-back');
+const $threadHeader    = document.getElementById('thread-header-info');
+const $threadMessages  = document.getElementById('thread-messages');
 
 // --- DOM: Friends ---
 
-const $inviteForm     = document.getElementById('invite-form');
-const $inviteUsername  = document.getElementById('invite-username');
-const $inviteBtn      = document.getElementById('invite-btn');
-const $inviteStatus   = document.getElementById('invite-status');
-const $inviteSearchResults = document.getElementById('invite-search-results');
+const $inviteStatus      = document.getElementById('invite-status');
+const $addFriendResults  = document.getElementById('add-friend-results');
 const $pendingSection = document.getElementById('pending-section');
 const $pendingCount   = document.getElementById('pending-count');
 const $pendingList    = document.getElementById('pending-list');
@@ -144,12 +150,14 @@ const $settingsUsernameError = document.getElementById('settings-username-error'
 
 // --- DOM: Picker ---
 
-const $picker        = document.getElementById('friend-picker');
-const $pickerClose   = document.getElementById('picker-close');
-const $pickerPreview = document.getElementById('picker-preview');
-const $pickerFriends = document.getElementById('picker-friends');
-const $pickerNote    = document.getElementById('picker-note');
-const $pickerSend    = document.getElementById('picker-send');
+const $picker            = document.getElementById('friend-picker');
+const $pickerClose       = document.getElementById('picker-close');
+const $pickerPreview     = document.getElementById('picker-preview');
+const $pickerFriends     = document.getElementById('picker-friends');
+const $pickerCircles     = document.getElementById('picker-circles');
+const $pickerCirclesWrap = document.getElementById('picker-circles-wrap');
+const $pickerNote        = document.getElementById('picker-note');
+const $pickerSend        = document.getElementById('picker-send');
 
 // ============================================================
 //  SESSION EXPIRY — auto-logout when JWT expires
@@ -157,8 +165,8 @@ const $pickerSend    = document.getElementById('picker-send');
 
 window.addEventListener('tania:session-expired', () => {
   currentUser = null;
-  feedCursor = null;
-  $feedList.innerHTML = '';
+  conversationsCache = [];
+  $conversationsList.innerHTML = '';
   showLogin();
   showToast('Session expired. Please sign in again.', 'error');
 });
@@ -201,6 +209,13 @@ async function init() {
   if (token && user) {
     currentUser = user;
     showApp();
+    // If the cached session predates avatar support, refresh from the server.
+    if (currentUser.avatarKey === undefined) {
+      api.getMyProfile().then(({ user: u }) => {
+        currentUser = u;
+        renderSettingsAvatar();
+      }).catch(() => {});
+    }
   } else {
     showLogin();
   }
@@ -333,6 +348,7 @@ function showApp() {
   $appView.hidden = false;
   $settingsUsername.textContent = currentUser.username;
   $settingsEmail.textContent = currentUser.email;
+  renderSettingsAvatar();
   switchView('inbox');
   startPolling();
   refreshPendingCount();
@@ -341,7 +357,8 @@ function showApp() {
 async function logout() {
   await clearAuth();
   currentUser = null;
-  feedCursor = null;
+  conversationsCache = [];
+  currentThread = null;
   resetViewState();
 
   await showLoader(2000);
@@ -352,22 +369,40 @@ async function logout() {
 /** Clear all transient UI state so nothing leaks between sessions. */
 function resetViewState() {
   // Inbox
-  $feedList.innerHTML = '';
-  $loadMore.hidden = true;
+  if ($conversationsList) $conversationsList.innerHTML = '';
+  if ($conversationsSearch) $conversationsSearch.value = '';
+  if ($viewThread) $viewThread.hidden = true;
+  currentFriendsTab = 'friends';
 
   // Friends
   $inviteStatus.hidden = true;
-  $inviteUsername.value = '';
   $pendingList.innerHTML = '';
   $pendingSection.hidden = true;
   $outgoingList.innerHTML = '';
   $outgoingSection.hidden = true;
   $friendsList.innerHTML = '';
   $friendsSearch.value = '';
-  $friendsSearch.hidden = true;
+  if ($addFriendResults) { $addFriendResults.innerHTML = ''; $addFriendResults.hidden = true; }
   cachedFriendRows = [];
   pendingRequestCount = 0;
   renderPendingBadge();
+
+  // Groups
+  if ($groupsList) {
+    groupsCache = [];
+    renderGroupsList();
+    if ($groupEditor) $groupEditor.hidden = true;
+  }
+
+  // Saved
+  if ($savedList) {
+    $savedList.innerHTML = '';
+    $savedLoadMore.hidden = true;
+    $savedUrlInput.value = '';
+    $savedNoteInput.value = '';
+    $savedFormError.hidden = true;
+    savedCursor = null;
+  }
 
   // Settings
   $settingsUsernameForm.hidden = true;
@@ -493,31 +528,45 @@ $settingsUsernameForm.addEventListener('submit', async (e) => {
 //  VIEW SWITCHING
 // ============================================================
 
-const views = { inbox: $viewInbox, sent: $viewSent, friends: $viewFriends, settings: $viewSettings };
+const views = { inbox: $viewInbox, saved: $viewSaved, friends: $viewFriends, settings: $viewSettings };
 const navButtons = document.querySelectorAll('.nav__btn');
 
 function switchView(name) {
   currentView = name;
 
-  // Always hide detail views when switching tabs
-  $viewDetail.hidden = true;
-  $viewSentDetail.hidden = true;
+  // Always exit the thread view when switching tabs
+  $viewThread.hidden = true;
+  currentThread = null;
 
-  // Toggle view containers
   for (const [key, el] of Object.entries(views)) {
     el.hidden = key !== name;
   }
 
-  // Toggle nav active state
   navButtons.forEach((btn) => {
     btn.classList.toggle('nav__btn--active', btn.dataset.view === name);
   });
 
-  // Load data on view enter
-  if (name === 'inbox') loadFeed();
-  if (name === 'sent') loadSent();
-  if (name === 'friends') loadFriends();
+  if (name === 'inbox')   loadConversations();
+  if (name === 'saved')   loadBookmarks();
+  if (name === 'friends') { loadFriends(); loadGroups(); setFriendsTab(currentFriendsTab); }
 }
+
+// --- Friends sub-tabs (Friends / Groups inside the Friends view) ---
+
+let currentFriendsTab = 'friends';
+
+function setFriendsTab(name) {
+  currentFriendsTab = name;
+  $viewFriends.classList.toggle('view-friends--tab-groups',  name === 'groups');
+  $viewFriends.classList.toggle('view-friends--tab-friends', name === 'friends');
+  document.querySelectorAll('.friends-tabs__btn').forEach((btn) => {
+    btn.classList.toggle('friends-tabs__btn--active', btn.dataset.friendsTab === name);
+  });
+}
+
+document.querySelectorAll('.friends-tabs__btn').forEach((btn) => {
+  btn.addEventListener('click', () => setFriendsTab(btn.dataset.friendsTab));
+});
 
 navButtons.forEach((btn) => {
   btn.addEventListener('click', () => switchView(btn.dataset.view));
@@ -591,67 +640,8 @@ function renderPendingBadge() {
 }
 
 // ============================================================
-//  FEED (INBOX VIEW)
+//  CONVERSATIONS (inbox grouped by peer / group)
 // ============================================================
-
-let isLoadingMore = false;
-
-async function loadFeed(append = false) {
-  if (!append) {
-    $feedLoading.hidden = false;
-    $feedList.innerHTML = '';
-    feedCursor = null;
-    feedItemsMap.clear();
-  }
-
-  try {
-    const { feed, nextCursor } = await api.getFeed(append ? feedCursor : undefined);
-    feedCursor = nextCursor;
-    hideError();
-
-    if (!append && feed.length === 0) {
-      $feedList.innerHTML = `
-        <li class="feed__empty-state">
-          <svg class="feed__empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
-            <path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/>
-          </svg>
-          <p class="feed__empty-title">Your inbox is empty</p>
-          <p class="feed__empty-text">Links shared by friends will appear here</p>
-        </li>`;
-    } else {
-      feed.forEach((item) => renderFeedItem(item));
-    }
-
-    $loadMore.hidden = !nextCursor;
-    refreshUnreadCount();
-  } catch (err) {
-    if (!append) {
-      $feedList.innerHTML = `
-        <li class="feed__error-state">
-          <svg class="feed__error-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"/>
-            <line x1="12" y1="8" x2="12" y2="12"/>
-            <line x1="12" y1="16" x2="12.01" y2="16"/>
-          </svg>
-          <p class="feed__error-text">Could not load your feed</p>
-          <button class="btn btn--ghost" id="feed-retry">Try again</button>
-        </li>`;
-      document.getElementById('feed-retry')?.addEventListener('click', () => loadFeed());
-    }
-    showError(err.message);
-  } finally {
-    $feedLoading.hidden = true;
-    isLoadingMore = false;
-    $loadMore.disabled = false;
-    $loadMore.textContent = 'Load more';
-  }
-}
-
-const DOUBLE_TICK_SVG = '<svg width="16" height="10" viewBox="0 0 16 10"><polyline points="1 5 4.5 8.5 8 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><polyline points="5.5 5 9 8.5 14.5 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-
-// Store feed items so detail view can look them up
-const feedItemsMap = new Map();
 
 function buildPlatformBadge(preview) {
   return preview.platform
@@ -665,326 +655,316 @@ function buildPlatformBadge(preview) {
       </span>`;
 }
 
-function renderFeedItem(item) {
-  const preview = buildLinkPreview(item.url);
-  feedItemsMap.set(item.id, { item, preview });
+function groupAvatarHtml(group, size = 'md') {
+  if (group.avatarUrl) return avatarHtml(group.name, null, size, group.avatarUrl);
+  if (group.avatarKey) return avatarHtml(group.name, group.avatarKey, size);
+  return `<span class="avatar avatar--${size} avatar--group" style="background:${escapeAttr(group.color || '#6366f1')}"><span class="avatar__initial">${escapeHtml((group.name || '?')[0].toUpperCase())}</span></span>`;
+}
 
+async function loadConversations() {
+  $conversationsLoading.hidden = false;
+  try {
+    const { conversations } = await api.getConversations();
+    conversationsCache = conversations;
+    renderConversationsList();
+    hideError();
+    refreshUnreadCount();
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    $conversationsLoading.hidden = true;
+  }
+}
+
+function conversationsMatch(c, q) {
+  if (!q) return true;
+  const needle = q.toLowerCase();
+  const name = c.kind === 'peer' ? c.peer.username : c.group.name;
+  if (name && name.toLowerCase().includes(needle)) return true;
+  if (c.lastSnippet && c.lastSnippet.toLowerCase().includes(needle)) return true;
+  return false;
+}
+
+function renderConversationsList() {
+  $conversationsList.innerHTML = '';
+  const q = ($conversationsSearch?.value || '').trim();
+  const filtered = q ? conversationsCache.filter((c) => conversationsMatch(c, q)) : conversationsCache;
+
+  if (conversationsCache.length === 0) {
+    $conversationsList.innerHTML = `
+      <li class="feed__empty-state">
+        <svg class="feed__empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/>
+        </svg>
+        <p class="feed__empty-title">No conversations yet</p>
+        <p class="feed__empty-text">Share a link with a friend or group to start a chat</p>
+      </li>`;
+    return;
+  }
+
+  if (filtered.length === 0) {
+    $conversationsList.innerHTML = `
+      <li class="feed__empty-state">
+        <p class="feed__empty-title">No matches</p>
+        <p class="feed__empty-text">Nothing matched "${escapeHtml(q)}"</p>
+      </li>`;
+    return;
+  }
+  filtered.forEach((c) => $conversationsList.appendChild(renderConversationRow(c)));
+}
+
+if ($conversationsSearch) {
+  $conversationsSearch.addEventListener('input', renderConversationsList);
+}
+
+function renderConversationRow(c) {
   const li = document.createElement('li');
-  li.className = `preview-card${item.read ? '' : ' preview-card--unread'}`;
-  li.dataset.shareId = item.id;
-
-  const time = timeAgo(item.sharedAt);
-
-  const statusHtml = item.read
-    ? `<span class="preview-card__status preview-card__status--seen">${DOUBLE_TICK_SVG}</span>`
-    : `<span class="preview-card__status preview-card__status--delivered">${DOUBLE_TICK_SVG}</span>`;
+  li.className = 'conv-row' + (c.unreadCount > 0 ? ' conv-row--unread' : '');
+  const avatar = c.kind === 'peer'
+    ? avatarHtml(c.peer.username, c.peer.avatarKey, 'md', c.peer.avatarUrl)
+    : groupAvatarHtml(c.group, 'md');
+  const name = c.kind === 'peer' ? escapeHtml(c.peer.username) : escapeHtml(c.group.name);
+  const groupTag = c.kind === 'group' ? '<span class="conv-row__tag">Group</span>' : '';
+  const youPrefix = c.lastSenderId && currentUser && c.lastSenderId === currentUser.id
+    ? '<span class="conv-row__you">You: </span>' : '';
+  const snippet = escapeHtml(truncate(c.lastSnippet || '', 64));
+  const time = c.lastAt ? timeAgo(c.lastAt) : '';
 
   li.innerHTML = `
-    <div class="preview-card__header">
-      ${buildPlatformBadge(preview)}
-      <div class="preview-card__header-actions">
-        <span class="preview-card__sender">from ${escapeHtml(item.sender.username)}</span>
-        <button class="preview-card__dismiss" title="Dismiss" data-dismiss="${escapeAttr(item.id)}">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
+    ${avatar}
+    <div class="conv-row__info">
+      <div class="conv-row__head">
+        <span class="conv-row__name">${name}${groupTag}</span>
+        <span class="conv-row__time">${time}</span>
+      </div>
+      <div class="conv-row__snippet-line">
+        <span class="conv-row__snippet">${youPrefix}${snippet}</span>
+        ${c.unreadCount > 0 ? `<span class="conv-row__unread">${c.unreadCount > 9 ? '9+' : c.unreadCount}</span>` : ''}
       </div>
     </div>
-    ${item.note ? `<p class="preview-card__note">${escapeHtml(item.note)}</p>` : ''}
-    <div class="preview-card__footer">
-      <span class="preview-card__time">${time}</span>
-      ${statusHtml}
-    </div>
   `;
-
-  $feedList.appendChild(li);
+  li.addEventListener('click', () => openConversation(c));
+  return li;
 }
 
-// --- Detail view ---
+// ============================================================
+//  CONVERSATION THREAD
+// ============================================================
 
-const $viewDetail = document.getElementById('view-detail');
-const $detailContent = document.getElementById('detail-content');
-const $detailBack = document.getElementById('detail-back');
-
-function openDetail(shareId) {
-  const entry = feedItemsMap.get(shareId);
-  if (!entry) return;
-  const { item, preview } = entry;
-  const displayTitle = item.ogTitle || item.title;
-  const displayUrl = truncateUrl(item.url, 55);
-  const time = timeAgo(item.sharedAt);
-
-  $detailContent.innerHTML = `
-    <div class="detail__card">
-      <div class="preview-card__header">
-        ${buildPlatformBadge(preview)}
-        <span class="preview-card__sender">from ${escapeHtml(item.sender.username)}</span>
-      </div>
-      ${item.note ? `<p class="detail__note">${escapeHtml(item.note)}</p>` : ''}
-      ${displayTitle ? `<h2 class="detail__title">${escapeHtml(displayTitle)}</h2>` : ''}
-      ${item.ogDescription ? `<p class="detail__desc">${escapeHtml(item.ogDescription)}</p>` : ''}
-      <a class="detail__url" href="${escapeAttr(item.url)}" target="_blank" rel="noopener">
-
-        <span>${escapeHtml(displayUrl)}</span>
-      </a>
-      <div class="preview-card__footer">
-        <span class="preview-card__time">${time}</span>
-        <span class="preview-card__status preview-card__status--seen">${DOUBLE_TICK_SVG}</span>
-      </div>
-    </div>
-  `;
-
-  // Hide inbox, show detail
+async function openConversation(conv) {
+  currentThread = conv;
   $viewInbox.hidden = true;
-  $viewDetail.hidden = false;
+  $viewThread.hidden = false;
+  renderThreadHeader(conv);
+  $threadMessages.innerHTML = '<div class="feed__loading"><div class="spinner"></div><span>Loading...</span></div>';
 
-  // Mark as seen + update the inbox card status
-  const card = $feedList.querySelector(`[data-share-id="${shareId}"]`);
-  if (card) {
-    card.classList.remove('preview-card--unread');
-    const statusEl = card.querySelector('.preview-card__status');
-    if (statusEl) {
-      statusEl.className = 'preview-card__status preview-card__status--seen';
-      statusEl.innerHTML = `${DOUBLE_TICK_SVG}`;
-    }
-  }
-  if (!item.read) {
-    item.read = true;
-    api.markRead(shareId).then(() => refreshUnreadCount()).catch(() => {});
+  const opts = conv.kind === 'peer'
+    ? { peerId: conv.peer.id }
+    : { groupId: conv.group.id };
+
+  try {
+    const { messages } = await api.getConversationThread(opts);
+    renderThreadMessages(messages);
+    api.markConversationRead(opts).then(() => refreshUnreadCount()).catch(() => {});
+  } catch (err) {
+    $threadMessages.innerHTML = `<p class="replies__error">${escapeHtml(err.message)}</p>`;
   }
 }
 
-$detailBack.addEventListener('click', () => {
-  $viewDetail.hidden = true;
-  $viewInbox.hidden = false;
-});
+function renderThreadHeader(conv) {
+  if (conv.kind === 'peer') {
+    $threadHeader.innerHTML = `
+      ${avatarHtml(conv.peer.username, conv.peer.avatarKey, 'md', conv.peer.avatarUrl)}
+      <div class="thread-header__text">
+        <h2 class="thread-header__title">${escapeHtml(conv.peer.username)}</h2>
+      </div>
+    `;
+  } else {
+    const memberSummary = conv.group && conv.group.members
+      ? `${conv.group.members.length} members`
+      : 'Group';
+    $threadHeader.innerHTML = `
+      ${groupAvatarHtml(conv.group, 'md')}
+      <div class="thread-header__text">
+        <h2 class="thread-header__title">${escapeHtml(conv.group.name)}</h2>
+        <span class="thread-header__sub">${memberSummary}</span>
+      </div>
+    `;
+  }
+}
 
-// --- Feed click handlers ---
+function renderThreadMessages(messages) {
+  if (!messages || messages.length === 0) {
+    $threadMessages.innerHTML = `<div class="thread-empty"><p>No messages yet — share a link below.</p></div>`;
+    return;
+  }
+  $threadMessages.innerHTML = '';
+  messages.forEach((m) => $threadMessages.appendChild(renderThreadMessage(m)));
+  requestAnimationFrame(() => { $threadMessages.scrollTop = $threadMessages.scrollHeight; });
+}
 
-$feedList.addEventListener('click', async (e) => {
-  // Dismiss button
-  const dismissBtn = e.target.closest('[data-dismiss]');
-  if (dismissBtn) {
+function renderThreadMessage(m) {
+  const wrapper = document.createElement('div');
+  wrapper.className = `thread-msg thread-msg--${m.direction}`;
+  wrapper.dataset.shareId = m.id;
+  wrapper.style.setProperty('--bubble-color', colorForUser(m.sender.username, m.sender.avatarKey));
+  const preview = buildLinkPreview(m.url);
+  const displayUrl = truncateUrl(m.url, 50);
+  const displayTitle = m.ogTitle || m.title || displayUrl;
+  const time = timeAgo(m.sharedAt);
+  const senderAvatar = avatarHtml(m.sender.username, m.sender.avatarKey, 'sm', m.sender.avatarUrl);
+  const replyCount = (m.replies || []).length;
+
+  const repliesHtml = (m.replies || []).map((r) => renderReplyHtml(r)).join('');
+
+  wrapper.innerHTML = `
+    <div class="thread-msg__row">
+      ${senderAvatar}
+      <div class="thread-msg__card">
+        <div class="thread-msg__head">
+          <span class="thread-msg__sender">${escapeHtml(m.sender.username)}</span>
+          <span class="thread-msg__time">${time}</span>
+        </div>
+        <div class="thread-msg__compact">
+          ${buildPlatformBadge(preview)}
+          <p class="thread-msg__title" title="${escapeAttr(displayTitle)}">${escapeHtml(displayTitle)}</p>
+          ${replyCount > 0 ? `<span class="thread-msg__reply-count">💬 ${replyCount}</span>` : ''}
+        </div>
+        <div class="thread-msg__expanded">
+          ${m.note ? `<p class="thread-msg__note">${escapeHtml(m.note)}</p>` : ''}
+          <a class="thread-msg__url" href="${escapeAttr(m.url)}" target="_blank" rel="noopener">${escapeHtml(displayUrl)}</a>
+          <div class="thread-msg__replies" data-share-id="${escapeAttr(m.id)}">
+            ${repliesHtml}
+          </div>
+          <div class="thread-msg__footer">
+            <form class="thread-msg__reply-form" data-share-id="${escapeAttr(m.id)}">
+              <input class="input thread-msg__reply-input" type="text" placeholder="Reply..." maxlength="1000" required>
+            </form>
+            <button class="thread-msg__action-btn" data-archive="${escapeAttr(m.id)}" title="Save to archive">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+              Save
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  return wrapper;
+}
+
+function renderReplyHtml(r) {
+  const isMine = currentUser && r.authorId === currentUser.id;
+  const color = colorForUser(r.author, r.avatarKey);
+  return `
+    <div class="thread-reply${isMine ? ' thread-reply--mine' : ''}" data-reply-id="${escapeAttr(r.id)}" style="--bubble-color:${color}">
+      ${avatarHtml(r.author, r.avatarKey, 'sm', r.avatarUrl)}
+      <div class="thread-reply__bubble">
+        <div class="thread-reply__head">
+          <span class="thread-reply__author">${escapeHtml(r.author)}</span>
+          <span class="thread-reply__time">${timeAgo(r.createdAt)}</span>
+        </div>
+        <p class="thread-reply__body">${escapeHtml(r.body)}</p>
+      </div>
+      ${isMine ? `<button class="thread-reply__delete" data-reply-delete="${escapeAttr(r.id)}" title="Delete">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>` : ''}
+    </div>
+  `;
+}
+
+$threadMessages.addEventListener('click', async (e) => {
+  const archiveBtn = e.target.closest('[data-archive]');
+  if (archiveBtn) {
     e.preventDefault();
     e.stopPropagation();
-    const shareId = dismissBtn.dataset.dismiss;
-    const card = dismissBtn.closest('.preview-card');
+    const shareId = archiveBtn.dataset.archive;
+    archiveBtn.disabled = true;
     try {
-      await api.dismissShare(shareId);
-      card.style.transition = 'opacity 0.2s, transform 0.2s';
-      card.style.opacity = '0';
-      card.style.transform = 'translateX(20px)';
-      setTimeout(() => card.remove(), 200);
-      showToast('Dismissed', 'success');
-      refreshUnreadCount();
+      await api.saveBookmarkFromShare(shareId);
+      showToast('Saved to archive', 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      archiveBtn.disabled = false;
+    }
+    return;
+  }
+  const delBtn = e.target.closest('[data-reply-delete]');
+  if (delBtn) {
+    e.stopPropagation();
+    const id = delBtn.dataset.replyDelete;
+    try {
+      await api.deleteReply(id);
+      delBtn.closest('.thread-reply')?.remove();
     } catch (err) {
       showToast(err.message, 'error');
     }
     return;
   }
 
-  // Click card to open detail
-  const card = e.target.closest('.preview-card');
-  if (!card) return;
-  const shareId = card.dataset.shareId;
-  if (shareId) openDetail(shareId);
-});
+  // Don't toggle when interacting with form/link inside the card.
+  if (e.target.closest('.thread-msg__url, .thread-msg__reply-form, .thread-reply__bubble')) return;
 
-// Load more with loading state
-$loadMore.addEventListener('click', () => {
-  if (isLoadingMore) return;
-  isLoadingMore = true;
-  $loadMore.disabled = true;
-  $loadMore.textContent = 'Loading...';
-  loadFeed(true);
-});
-
-// ============================================================
-//  SENT VIEW
-// ============================================================
-
-const $sentLoading       = document.getElementById('sent-loading');
-const $sentList          = document.getElementById('sent-list');
-const $sentLoadMore      = document.getElementById('sent-load-more');
-const $sentDetailContent = document.getElementById('sent-detail-content');
-const $sentDetailBack    = document.getElementById('sent-detail-back');
-
-let sentCursor = null;
-let sentItemsMap = new Map();
-let isSentLoadingMore = false;
-
-async function loadSent(append = false) {
-  if (!append) {
-    $sentLoading.hidden = false;
-    $sentList.innerHTML = '';
-    sentCursor = null;
-    sentItemsMap.clear();
+  const card = e.target.closest('.thread-msg');
+  if (card) {
+    card.classList.toggle('thread-msg--expanded');
+    // Auto-focus the reply input on expand for quick replying.
+    if (card.classList.contains('thread-msg--expanded')) {
+      const input = card.querySelector('.thread-msg__reply-input');
+      if (input) setTimeout(() => input.focus(), 50);
+    }
   }
+});
 
+$threadMessages.addEventListener('submit', async (e) => {
+  const form = e.target.closest('.thread-msg__reply-form');
+  if (!form) return;
+  e.preventDefault();
+  const shareId = form.dataset.shareId;
+  const input = form.querySelector('.thread-msg__reply-input');
+  const body = input.value.trim();
+  if (!body) return;
+  input.disabled = true;
   try {
-    const { sent, nextCursor } = await api.getSent(append ? sentCursor : undefined);
-    sentCursor = nextCursor;
-
-    if (!append && sent.length === 0) {
-      $sentList.innerHTML = `
-        <li class="feed__empty-state">
-          <svg class="feed__empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="22" y1="2" x2="11" y2="13"/>
-            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-          </svg>
-          <p class="feed__empty-title">Nothing sent yet</p>
-          <p class="feed__empty-text">Links you share will appear here</p>
-        </li>`;
-    } else {
-      sent.forEach((item) => renderSentItem(item));
-    }
-
-    $sentLoadMore.hidden = !nextCursor;
+    const { reply } = await api.postReply(shareId, body);
+    const card = form.closest('.thread-msg');
+    const repliesEl = card?.querySelector(`.thread-msg__replies[data-share-id="${shareId}"]`);
+    if (repliesEl) repliesEl.insertAdjacentHTML('beforeend', renderReplyHtml(reply));
+    input.value = '';
   } catch (err) {
-    if (!append) {
-      $sentList.innerHTML = `
-        <li class="feed__error-state">
-          <svg class="feed__error-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"/>
-            <line x1="12" y1="8" x2="12" y2="12"/>
-            <line x1="12" y1="16" x2="12.01" y2="16"/>
-          </svg>
-          <p class="feed__error-text">Could not load sent items</p>
-          <button class="btn btn--ghost" id="sent-retry">Try again</button>
-        </li>`;
-      document.getElementById('sent-retry')?.addEventListener('click', () => loadSent());
-    }
-    showError(err.message);
+    showToast(err.message, 'error');
   } finally {
-    $sentLoading.hidden = true;
-    isSentLoadingMore = false;
-    $sentLoadMore.disabled = false;
-    $sentLoadMore.textContent = 'Load more';
+    input.disabled = false;
+    input.focus();
   }
-}
-
-function recipientStatusHtml(r) {
-  if (r.seen) {
-    return `<span class="preview-card__status preview-card__status--seen">${DOUBLE_TICK_SVG}</span>`;
-  }
-  if (r.delivered) {
-    return `<span class="preview-card__status preview-card__status--delivered">${DOUBLE_TICK_SVG}</span>`;
-  }
-  return `<span class="preview-card__status preview-card__status--pending">Sent</span>`;
-}
-
-function renderSentItem(item) {
-  const preview = buildLinkPreview(item.url);
-  sentItemsMap.set(item.id, { item, preview });
-
-  const li = document.createElement('li');
-  li.className = 'preview-card';
-  li.dataset.shareId = item.id;
-
-  const time = timeAgo(item.sharedAt);
-  const toNames = item.recipients.map(r => escapeHtml(r.username)).join(', ');
-
-  // Overall status: worst status among recipients
-  const allSeen = item.recipients.every(r => r.seen);
-  const allDelivered = item.recipients.every(r => r.delivered);
-  let overallStatus;
-  if (allSeen) {
-    overallStatus = `<span class="preview-card__status preview-card__status--seen">${DOUBLE_TICK_SVG}</span>`;
-  } else if (allDelivered) {
-    overallStatus = `<span class="preview-card__status preview-card__status--delivered">${DOUBLE_TICK_SVG}</span>`;
-  } else {
-    overallStatus = `<span class="preview-card__status preview-card__status--pending">Sent</span>`;
-  }
-
-  li.innerHTML = `
-    <div class="preview-card__header">
-      ${buildPlatformBadge(preview)}
-      <span class="preview-card__sender">to ${toNames}</span>
-    </div>
-    ${item.note ? `<p class="preview-card__note">${escapeHtml(item.note)}</p>` : ''}
-    <div class="preview-card__footer">
-      <span class="preview-card__time">${time}</span>
-      ${overallStatus}
-    </div>
-  `;
-
-  $sentList.appendChild(li);
-}
-
-// Sent card click → detail
-$sentList.addEventListener('click', (e) => {
-  const card = e.target.closest('.preview-card');
-  if (!card) return;
-  const shareId = card.dataset.shareId;
-  if (shareId) openSentDetail(shareId);
 });
 
-function openSentDetail(shareId) {
-  const entry = sentItemsMap.get(shareId);
-  if (!entry) return;
-  const { item, preview } = entry;
-  const displayTitle = item.ogTitle || item.title;
-  const displayUrl = truncateUrl(item.url, 55);
-  const time = timeAgo(item.sharedAt);
-
-  const recipientRows = item.recipients.map(r => `
-    <div class="detail__recipient">
-      <span class="detail__recipient-name">${escapeHtml(r.username)}</span>
-      ${recipientStatusHtml(r)}
-    </div>
-  `).join('');
-
-  $sentDetailContent.innerHTML = `
-    <div class="detail__card">
-      <div class="preview-card__header">
-        ${buildPlatformBadge(preview)}
-        <span class="preview-card__time">${time}</span>
-      </div>
-      ${item.note ? `<p class="detail__note">${escapeHtml(item.note)}</p>` : ''}
-      ${displayTitle ? `<h2 class="detail__title">${escapeHtml(displayTitle)}</h2>` : ''}
-      ${item.ogDescription ? `<p class="detail__desc">${escapeHtml(item.ogDescription)}</p>` : ''}
-      <a class="detail__url" href="${escapeAttr(item.url)}" target="_blank" rel="noopener">
-
-        <span>${escapeHtml(displayUrl)}</span>
-      </a>
-      <div class="detail__recipients">
-        <h3 class="detail__recipients-title">Recipients</h3>
-        ${recipientRows}
-      </div>
-    </div>
-  `;
-
-  $viewSent.hidden = true;
-  $viewSentDetail.hidden = false;
-}
-
-$sentDetailBack.addEventListener('click', () => {
-  $viewSentDetail.hidden = true;
-  $viewSent.hidden = false;
+$threadBack.addEventListener('click', () => {
+  $viewThread.hidden = true;
+  $viewInbox.hidden = false;
+  currentThread = null;
+  loadConversations();
 });
 
-$sentLoadMore.addEventListener('click', () => {
-  if (isSentLoadingMore) return;
-  isSentLoadingMore = true;
-  $sentLoadMore.disabled = true;
-  $sentLoadMore.textContent = 'Loading...';
-  loadSent(true);
-});
+// The bottom "paste a link" composer was removed by design — once a chat
+// exists, the only input is the per-message Reply field. New conversations
+// start via the Inbox drop-zone + friend/group picker flow.
 
 // --- Polling ---
 
 function startPolling() {
   stopPolling();
-  feedPollingId = setInterval(() => {
-    if (currentView === 'inbox') loadFeed();
+  conversationsPollingId = setInterval(() => {
+    if (currentView === 'inbox' && !currentThread) loadConversations();
     refreshUnreadCount();
     refreshPendingCount();
   }, 30_000);
 }
 
 function stopPolling() {
-  if (feedPollingId) {
-    clearInterval(feedPollingId);
-    feedPollingId = null;
+  if (conversationsPollingId) {
+    clearInterval(conversationsPollingId);
+    conversationsPollingId = null;
   }
 }
 
@@ -1019,7 +999,7 @@ async function loadFriends() {
         li.className = 'friend-row';
         li.innerHTML = `
           <div class="friend-row__info">
-            <span class="friend-row__avatar">${req.user.username[0].toUpperCase()}</span>
+            ${avatarHtml(req.user.username, req.user.avatarKey, 'sm', req.user.avatarUrl)}
             <span class="friend-row__name">${escapeHtml(req.user.username)}</span>
           </div>
           <div class="friend-row__actions">
@@ -1040,7 +1020,7 @@ async function loadFriends() {
         li.className = 'friend-row';
         li.innerHTML = `
           <div class="friend-row__info">
-            <span class="friend-row__avatar">${req.user.username[0].toUpperCase()}</span>
+            ${avatarHtml(req.user.username, req.user.avatarKey, 'sm', req.user.avatarUrl)}
             <span class="friend-row__name">${escapeHtml(req.user.username)}</span>
           </div>
           <span class="friend-row__status">Pending</span>
@@ -1053,9 +1033,6 @@ async function loadFriends() {
 
     // --- Accepted friends ---
     $friendsCount.textContent = friends.length || '';
-
-    // Show search input when there are 5+ friends
-    $friendsSearch.hidden = friends.length < 5;
 
     if (friends.length === 0) {
       $friendsList.innerHTML = `
@@ -1074,7 +1051,7 @@ async function loadFriends() {
         li.dataset.username = f.user.username.toLowerCase();
         li.innerHTML = `
           <div class="friend-row__info">
-            <span class="friend-row__avatar">${f.user.username[0].toUpperCase()}</span>
+            ${avatarHtml(f.user.username, f.user.avatarKey, 'sm', f.user.avatarUrl)}
             <div>
               <span class="friend-row__name">${escapeHtml(f.user.username)}</span>
               <span class="friend-row__since">Friends since ${new Date(f.since).toLocaleDateString()}</span>
@@ -1101,13 +1078,109 @@ async function loadFriends() {
   }
 }
 
-// --- Friends search filter ---
+// --- Unified search: filter friends list + surface non-friends to add ---
+
+function highlightMatch(text, query) {
+  if (!query) return escapeHtml(text);
+  const q = query.toLowerCase();
+  const t = text.toLowerCase();
+  const i = t.indexOf(q);
+  if (i < 0) return escapeHtml(text);
+  return (
+    escapeHtml(text.slice(0, i)) +
+    `<mark class="search-mark">${escapeHtml(text.slice(i, i + q.length))}</mark>` +
+    escapeHtml(text.slice(i + q.length))
+  );
+}
+
+let friendsSearchTimer = null;
+let friendsSearchSeq = 0;
 
 $friendsSearch.addEventListener('input', () => {
   const query = $friendsSearch.value.trim().toLowerCase();
+
+  // Filter existing friend rows in place.
   for (const row of cachedFriendRows) {
     const username = row.dataset.username || '';
     row.hidden = query && !username.includes(query);
+  }
+  $inviteStatus.hidden = true;
+
+  // Look up non-friend matches to offer "Add" buttons.
+  clearTimeout(friendsSearchTimer);
+  if (query.length < 1) {
+    $addFriendResults.innerHTML = '';
+    $addFriendResults.hidden = true;
+    return;
+  }
+  const mySeq = ++friendsSearchSeq;
+  friendsSearchTimer = setTimeout(async () => {
+    try {
+      const { users } = await api.searchUsers(query);
+      if (mySeq !== friendsSearchSeq) return;
+      const candidates = users.filter((u) => u.status !== 'accepted');
+      renderAddFriendResults(candidates, query);
+    } catch {
+      $addFriendResults.hidden = true;
+    }
+  }, 180);
+});
+
+function renderAddFriendResults(users, query) {
+  $addFriendResults.innerHTML = '';
+  if (users.length === 0) {
+    $addFriendResults.hidden = true;
+    return;
+  }
+  for (const u of users) {
+    const li = document.createElement('li');
+    li.className = 'invite-search-row';
+    li.dataset.username = u.username;
+    const mutualLabel = u.mutualCount > 0
+      ? `<span class="search-mutuals">${u.mutualCount} mutual</span>` : '';
+    let actionHtml;
+    if (u.status === 'pending') {
+      actionHtml = '<span class="search-status search-status--pending">Pending</span>';
+    } else {
+      actionHtml = `<button class="btn btn--primary btn--sm" data-add-username="${escapeAttr(u.username)}">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add
+      </button>`;
+    }
+    li.innerHTML = `
+      ${avatarHtml(u.username, u.avatarKey, 'sm', u.avatarUrl)}
+      <div class="invite-search-row__info">
+        <span class="search-username">${highlightMatch(u.username, query)}</span>
+        ${mutualLabel}
+      </div>
+      ${actionHtml}
+    `;
+    $addFriendResults.appendChild(li);
+  }
+  $addFriendResults.hidden = false;
+}
+
+$addFriendResults.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-add-username]');
+  if (!btn) return;
+  const username = btn.dataset.addUsername;
+  btn.disabled = true;
+  btn.textContent = '...';
+  try {
+    await api.inviteFriend(username);
+    $inviteStatus.textContent = `Request sent to ${username}`;
+    $inviteStatus.className = 'invite-status invite-status--success';
+    $inviteStatus.hidden = false;
+    $friendsSearch.value = '';
+    $addFriendResults.innerHTML = '';
+    $addFriendResults.hidden = true;
+    loadFriends();
+  } catch (err) {
+    $inviteStatus.textContent = err.message;
+    $inviteStatus.className = 'invite-status invite-status--error';
+    $inviteStatus.hidden = false;
+    btn.disabled = false;
+    btn.textContent = 'Add';
   }
 });
 
@@ -1129,82 +1202,6 @@ $pendingList.addEventListener('click', async (e) => {
     showToast(err.message, 'error');
     btn.disabled = false;
     btn.textContent = 'Accept';
-  }
-});
-
-// --- User search (autocomplete while typing username) ---
-
-let searchTimeout = null;
-
-$inviteUsername.addEventListener('input', () => {
-  clearTimeout(searchTimeout);
-  const q = $inviteUsername.value.trim();
-  if (q.length < 2) {
-    $inviteSearchResults.hidden = true;
-    return;
-  }
-  searchTimeout = setTimeout(async () => {
-    try {
-      const { users } = await api.searchUsers(q);
-      if ($inviteUsername.value.trim().length < 2) return; // input cleared while waiting
-      $inviteSearchResults.innerHTML = '';
-      if (users.length === 0) {
-        $inviteSearchResults.innerHTML = '<li class="invite-search-empty">No users found</li>';
-      } else {
-        for (const u of users) {
-          const li = document.createElement('li');
-          let statusHtml = '';
-          if (u.status === 'accepted') {
-            statusHtml = '<span class="search-status search-status--accepted">Friends</span>';
-          } else if (u.status === 'pending') {
-            statusHtml = '<span class="search-status search-status--pending">Pending</span>';
-          }
-          li.innerHTML = `<span class="search-username">${u.username}</span>${statusHtml}`;
-          li.addEventListener('click', () => {
-            $inviteUsername.value = u.username;
-            $inviteSearchResults.hidden = true;
-          });
-          $inviteSearchResults.appendChild(li);
-        }
-      }
-      $inviteSearchResults.hidden = false;
-    } catch {
-      $inviteSearchResults.hidden = true;
-    }
-  }, 300);
-});
-
-// Close search dropdown when clicking outside
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('.invite-input-wrap')) {
-    $inviteSearchResults.hidden = true;
-  }
-});
-
-// --- Invite friend ---
-
-$inviteForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const username = $inviteUsername.value.trim();
-  if (!username) return;
-
-  $inviteBtn.disabled = true;
-  $inviteStatus.hidden = true;
-
-  try {
-    await api.inviteFriend(username);
-    $inviteStatus.textContent = `Request sent to ${username}`;
-    $inviteStatus.className = 'invite-status invite-status--success';
-    $inviteStatus.hidden = false;
-    $inviteUsername.value = '';
-    $inviteSearchResults.hidden = true;
-    loadFriends(); // Refresh to show in outgoing
-  } catch (err) {
-    $inviteStatus.textContent = err.message;
-    $inviteStatus.className = 'invite-status invite-status--error';
-    $inviteStatus.hidden = false;
-  } finally {
-    $inviteBtn.disabled = false;
   }
 });
 
@@ -1264,11 +1261,16 @@ chrome.runtime.onMessage.addListener((message) => {
 //  FRIEND PICKER (share overlay)
 // ============================================================
 
+let pickerGroupsCache = [];
+
 async function openPicker(url) {
   pendingLink = buildLinkPreview(url);
   selectedFriends.clear();
+  selectedPickerGroupId = null;
+  pickerGroupsCache = [];
   $pickerNote.value = '';
   $pickerSend.disabled = true;
+  $pickerCirclesWrap.hidden = true;
 
   const platform = pendingLink.platform;
   $pickerPreview.innerHTML = `
@@ -1282,9 +1284,16 @@ async function openPicker(url) {
   $picker.hidden = false;
 
   try {
-    const { friends } = await api.getFriends();
-    if (friends.length === 0) {
-      $pickerFriends.innerHTML = '<p class="picker__empty">No friends yet. Add friends first!</p>';
+    const [{ friends }, { groups }] = await Promise.all([
+      api.getFriends(),
+      api.getGroups().catch(() => ({ groups: [] })),
+    ]);
+
+    pickerGroupsCache = groups.filter((g) => g.memberCount > 1);
+    renderPickerGroups();
+
+    if (friends.length === 0 && pickerGroupsCache.length === 0) {
+      $pickerFriends.innerHTML = '<p class="picker__empty">No friends or groups yet. Add some on the Friends tab!</p>';
       return;
     }
 
@@ -1294,7 +1303,7 @@ async function openPicker(url) {
       item.className = 'picker__friend';
       item.innerHTML = `
         <input type="checkbox" class="picker__checkbox" value="${escapeAttr(f.user.id)}">
-        <span class="picker__avatar">${f.user.username[0].toUpperCase()}</span>
+        ${avatarHtml(f.user.username, f.user.avatarKey, 'sm', f.user.avatarUrl)}
         <span class="picker__name">${escapeHtml(f.user.username)}</span>
       `;
       $pickerFriends.appendChild(item);
@@ -1304,10 +1313,57 @@ async function openPicker(url) {
   }
 }
 
+function renderPickerGroups() {
+  if (pickerGroupsCache.length === 0) {
+    $pickerCirclesWrap.hidden = true;
+    return;
+  }
+  $pickerCirclesWrap.hidden = false;
+  $pickerCircles.innerHTML = '';
+  pickerGroupsCache.forEach((g) => {
+    const active = g.id === selectedPickerGroupId;
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'picker__circle-chip' + (active ? ' picker__circle-chip--active' : '');
+    chip.dataset.groupId = g.id;
+    const dotHtml = (g.avatarUrl || g.avatarKey)
+      ? groupAvatarHtml(g, 'sm')
+      : `<span class="picker__circle-dot" style="background:${escapeAttr(g.color)}"></span>`;
+    chip.innerHTML = `
+      ${dotHtml}
+      <span class="picker__circle-name">${escapeHtml(g.name)}</span>
+      <span class="picker__circle-count">${g.memberCount}</span>
+    `;
+    chip.addEventListener('click', () => selectPickerGroup(active ? null : g.id));
+    $pickerCircles.appendChild(chip);
+  });
+}
+
+function selectPickerGroup(groupId) {
+  selectedPickerGroupId = groupId;
+  if (groupId) {
+    // Group-target: clear individual selection, disable friend checkboxes
+    selectedFriends.clear();
+    $pickerFriends.querySelectorAll('.picker__checkbox').forEach((cb) => {
+      cb.checked = false;
+      cb.disabled = true;
+    });
+    $pickerFriends.classList.add('picker__list--locked');
+  } else {
+    $pickerFriends.querySelectorAll('.picker__checkbox').forEach((cb) => { cb.disabled = false; });
+    $pickerFriends.classList.remove('picker__list--locked');
+  }
+  $pickerSend.disabled = !groupId && selectedFriends.size === 0;
+  renderPickerGroups();
+}
+
 function closePicker() {
   $picker.hidden = true;
   pendingLink = null;
   selectedFriends.clear();
+  selectedPickerGroupId = null;
+  $pickerFriends.querySelectorAll('.picker__checkbox').forEach((cb) => { cb.disabled = false; });
+  $pickerFriends.classList.remove('picker__list--locked');
 }
 
 $pickerClose.addEventListener('click', closePicker);
@@ -1318,11 +1374,12 @@ $pickerFriends.addEventListener('change', (e) => {
   if (!cb) return;
   if (cb.checked) selectedFriends.add(cb.value);
   else selectedFriends.delete(cb.value);
-  $pickerSend.disabled = selectedFriends.size === 0;
+  $pickerSend.disabled = !selectedPickerGroupId && selectedFriends.size === 0;
 });
 
 $pickerSend.addEventListener('click', async () => {
-  if (!pendingLink || selectedFriends.size === 0) return;
+  if (!pendingLink) return;
+  if (!selectedPickerGroupId && selectedFriends.size === 0) return;
 
   $pickerSend.disabled = true;
   $pickerSend.textContent = 'Sending...';
@@ -1331,17 +1388,18 @@ $pickerSend.addEventListener('click', async () => {
     const platform = pendingLink.platform;
     await api.share(
       pendingLink.url,
-      [...selectedFriends],
+      selectedPickerGroupId ? null : [...selectedFriends],
       {
-        title: pendingLink.sublabel || undefined,
-        note: $pickerNote.value.trim() || undefined,
+        title:    pendingLink.sublabel || undefined,
+        note:     $pickerNote.value.trim() || undefined,
         platform: platform?.id || undefined,
+        groupId:  selectedPickerGroupId || undefined,
       }
     );
 
     closePicker();
     showToast('Shared!', 'success');
-    if (currentView === 'inbox') loadFeed();
+    if (currentView === 'inbox' && !currentThread) loadConversations();
   } catch (err) {
     showToast(err.message, 'error');
   } finally {
@@ -1386,6 +1444,11 @@ function escapeAttr(str) {
   return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function truncate(str, max) {
+  if (!str) return '';
+  return str.length > max ? str.slice(0, max - 1).trimEnd() + '…' : str;
+}
+
 function truncateUrl(url, max) {
   try {
     const u = new URL(url);
@@ -1407,6 +1470,532 @@ function timeAgo(dateStr) {
   if (days < 7) return `${days}d ago`;
   return new Date(dateStr).toLocaleDateString();
 }
+
+// ============================================================
+//  AVATAR PICKER (settings)
+// ============================================================
+
+const $settingsAvatarCurrent = document.getElementById('settings-avatar-current');
+const $settingsAvatarEdit    = document.getElementById('settings-avatar-edit');
+const $settingsAvatarPicker  = document.getElementById('settings-avatar-picker');
+const $settingsAvatarFile    = document.getElementById('settings-avatar-file');
+
+function renderSettingsAvatar() {
+  if (!$settingsAvatarCurrent || !currentUser) return;
+  $settingsAvatarCurrent.innerHTML = avatarHtml(
+    currentUser.username || '?',
+    currentUser.avatarKey,
+    'md',
+    currentUser.avatarUrl
+  );
+}
+
+function renderAvatarPickerGrid() {
+  $settingsAvatarPicker.innerHTML = '';
+
+  // Upload tile — opens the file input.
+  const uploadBtn = document.createElement('button');
+  uploadBtn.type = 'button';
+  uploadBtn.className = 'group-avatar-swatch group-avatar-swatch--upload' + (currentUser?.avatarUrl ? ' group-avatar-swatch--active' : '');
+  uploadBtn.title = 'Upload photo';
+  uploadBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
+  uploadBtn.addEventListener('click', () => $settingsAvatarFile.click());
+  $settingsAvatarPicker.appendChild(uploadBtn);
+
+  // None / initials option
+  const noneBtn = document.createElement('button');
+  noneBtn.type = 'button';
+  noneBtn.className = 'group-avatar-swatch group-avatar-swatch--none' + (!currentUser?.avatarKey && !currentUser?.avatarUrl ? ' group-avatar-swatch--active' : '');
+  noneBtn.title = 'Initial only';
+  noneBtn.innerHTML = `<span class="group-avatar-swatch__x">∅</span>`;
+  noneBtn.addEventListener('click', () => pickAvatar(null));
+  $settingsAvatarPicker.appendChild(noneBtn);
+
+  AVATAR_PRESETS.forEach((a) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'group-avatar-swatch' + (currentUser?.avatarKey === a.key && !currentUser?.avatarUrl ? ' group-avatar-swatch--active' : '');
+    btn.style.background = a.bg;
+    btn.title = a.key;
+    btn.innerHTML = `<span class="group-avatar-swatch__emoji">${a.emoji}</span>`;
+    btn.addEventListener('click', () => pickAvatar(a.key));
+    $settingsAvatarPicker.appendChild(btn);
+  });
+}
+
+async function pickAvatar(key) {
+  try {
+    const { user } = await api.updateAvatar(key);
+    currentUser = user;
+    renderSettingsAvatar();
+    renderAvatarPickerGrid();
+    showToast('Avatar updated', 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+if ($settingsAvatarFile) {
+  $settingsAvatarFile.addEventListener('change', async () => {
+    const file = $settingsAvatarFile.files?.[0];
+    if (!file) return;
+    showToast('Uploading photo...', 'success');
+    try {
+      const { user } = await api.uploadProfileAvatar(file);
+      currentUser = user;
+      renderSettingsAvatar();
+      renderAvatarPickerGrid();
+      showToast('Photo uploaded', 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      $settingsAvatarFile.value = '';
+    }
+  });
+}
+
+if ($settingsAvatarEdit) {
+  $settingsAvatarEdit.addEventListener('click', () => {
+    $settingsAvatarPicker.hidden = !$settingsAvatarPicker.hidden;
+    if (!$settingsAvatarPicker.hidden) renderAvatarPickerGrid();
+  });
+}
+
+// ============================================================
+//  NOTIFICATIONS TOGGLE (settings)
+// ============================================================
+
+const $notificationsToggle = document.getElementById('settings-notifications-toggle');
+
+if ($notificationsToggle) {
+  chrome.storage.local.get(['notificationsEnabled'], (data) => {
+    $notificationsToggle.checked = data.notificationsEnabled !== false;
+  });
+
+  $notificationsToggle.addEventListener('change', () => {
+    chrome.storage.local.set({ notificationsEnabled: $notificationsToggle.checked });
+    showToast($notificationsToggle.checked ? 'Notifications on' : 'Notifications off', 'success');
+  });
+}
+
+// ============================================================
+//  GROUPS (shared multi-user spaces)
+// ============================================================
+
+const $groupsList       = document.getElementById('groups-list');
+const $groupsEmpty      = document.getElementById('groups-empty');
+const $newGroupBtn      = document.getElementById('new-group-btn');
+const $groupEditor      = document.getElementById('group-editor');
+const $groupEditorTitle = document.getElementById('group-editor-title');
+const $groupEditorName  = document.getElementById('group-editor-name');
+const $groupEditorAvatars = document.getElementById('group-editor-avatars');
+const $groupEditorAvatarFile = document.getElementById('group-editor-avatar-file');
+const $groupEditorColors  = document.getElementById('group-editor-colors');
+const $groupEditorMembers = document.getElementById('group-editor-members');
+const $groupEditorMemberSearch = document.getElementById('group-editor-member-search');
+const $groupEditorError = document.getElementById('group-editor-error');
+const $groupEditorClose = document.getElementById('group-editor-close');
+const $groupEditorSave  = document.getElementById('group-editor-save');
+const $groupEditorDelete = document.getElementById('group-editor-delete');
+
+const GROUP_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4', '#a855f7', '#ec4899', '#64748b'];
+
+let groupsCache = [];
+let editingGroup = null;
+let groupEditorColor = GROUP_COLORS[0];
+let groupEditorAvatarKey = null;
+let groupEditorAvatarUrl = null;
+let groupEditorMembers = new Set();
+
+async function loadGroups() {
+  try {
+    const { groups } = await api.getGroups();
+    groupsCache = groups;
+    renderGroupsList();
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
+function renderGroupsList() {
+  $groupsList.innerHTML = '';
+  if (groupsCache.length === 0) {
+    $groupsList.appendChild($groupsEmpty);
+    $groupsEmpty.hidden = false;
+    return;
+  }
+  $groupsEmpty.hidden = true;
+  groupsCache.forEach((g) => {
+    const li = document.createElement('li');
+    li.className = 'circle-row';
+    li.dataset.groupId = g.id;
+    const memberSummary = g.members.slice(0, 3).map((m) => escapeHtml(m.username)).join(', ');
+    const extra = g.memberCount > 3 ? ` +${g.memberCount - 3}` : '';
+    li.innerHTML = `
+      ${groupAvatarHtml(g, 'sm')}
+      <div class="circle-row__info">
+        <span class="circle-row__name">${escapeHtml(g.name)}</span>
+        <span class="circle-row__members">${g.memberCount <= 1 ? 'Just you — add members' : memberSummary + extra}</span>
+      </div>
+      <button class="btn-icon circle-row__edit" type="button" title="Edit">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+      </button>
+    `;
+    li.querySelector('.circle-row__edit').addEventListener('click', (e) => {
+      e.stopPropagation();
+      openGroupEditor(g);
+    });
+    li.addEventListener('click', () => openGroupEditor(g));
+    $groupsList.appendChild(li);
+  });
+}
+
+function renderGroupColorSwatches() {
+  $groupEditorColors.innerHTML = '';
+  GROUP_COLORS.forEach((color) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'circle-color-swatch';
+    if (color === groupEditorColor) btn.classList.add('circle-color-swatch--active');
+    btn.style.background = color;
+    btn.addEventListener('click', () => {
+      groupEditorColor = color;
+      renderGroupColorSwatches();
+    });
+    $groupEditorColors.appendChild(btn);
+  });
+}
+
+function renderGroupAvatarSwatches() {
+  $groupEditorAvatars.innerHTML = '';
+
+  // Upload tile (only enabled when the group already exists — uploads need a target group_id).
+  const uploadBtn = document.createElement('button');
+  uploadBtn.type = 'button';
+  uploadBtn.className = 'group-avatar-swatch group-avatar-swatch--upload' + (groupEditorAvatarUrl ? ' group-avatar-swatch--active' : '');
+  uploadBtn.title = editingGroup ? 'Upload photo' : 'Save the group first to upload a photo';
+  uploadBtn.disabled = !editingGroup;
+  uploadBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
+  if (editingGroup) uploadBtn.addEventListener('click', () => $groupEditorAvatarFile.click());
+  $groupEditorAvatars.appendChild(uploadBtn);
+
+  // "None" option
+  const none = document.createElement('button');
+  none.type = 'button';
+  none.className = 'group-avatar-swatch group-avatar-swatch--none' + (groupEditorAvatarKey == null && !groupEditorAvatarUrl ? ' group-avatar-swatch--active' : '');
+  none.title = 'Initial only';
+  none.innerHTML = `<span class="group-avatar-swatch__x">∅</span>`;
+  none.addEventListener('click', () => {
+    groupEditorAvatarKey = null;
+    renderGroupAvatarSwatches();
+  });
+  $groupEditorAvatars.appendChild(none);
+
+  AVATAR_PRESETS.forEach((a) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'group-avatar-swatch' + (groupEditorAvatarKey === a.key && !groupEditorAvatarUrl ? ' group-avatar-swatch--active' : '');
+    btn.style.background = a.bg;
+    btn.title = a.key;
+    btn.innerHTML = `<span class="group-avatar-swatch__emoji">${a.emoji}</span>`;
+    btn.addEventListener('click', () => {
+      groupEditorAvatarKey = a.key;
+      renderGroupAvatarSwatches();
+    });
+    $groupEditorAvatars.appendChild(btn);
+  });
+}
+
+if ($groupEditorAvatarFile) {
+  $groupEditorAvatarFile.addEventListener('change', async () => {
+    const file = $groupEditorAvatarFile.files?.[0];
+    if (!file || !editingGroup) return;
+    showToast('Uploading photo...', 'success');
+    try {
+      const { avatarUrl } = await api.uploadGroupAvatar(editingGroup.id, file);
+      groupEditorAvatarUrl = avatarUrl;
+      groupEditorAvatarKey = null;
+      editingGroup.avatarUrl = avatarUrl;
+      editingGroup.avatarKey = null;
+      renderGroupAvatarSwatches();
+      showToast('Photo uploaded', 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      $groupEditorAvatarFile.value = '';
+    }
+  });
+}
+
+async function openGroupEditor(group) {
+  editingGroup = group || null;
+  groupEditorColor = group?.color || GROUP_COLORS[0];
+  groupEditorAvatarKey = group?.avatarKey || null;
+  groupEditorAvatarUrl = group?.avatarUrl || null;
+  groupEditorMembers = new Set((group?.members || []).map((m) => m.id).filter((id) => !currentUser || id !== currentUser.id));
+
+  $groupEditorTitle.textContent = group ? 'Edit group' : 'New group';
+  $groupEditorName.value = group?.name || '';
+  $groupEditorError.hidden = true;
+  $groupEditorDelete.hidden = !group;
+  renderGroupColorSwatches();
+  renderGroupAvatarSwatches();
+
+  $groupEditor.hidden = false;
+  $groupEditorName.focus();
+  $groupEditorMembers.innerHTML = '<div class="feed__loading"><div class="spinner"></div><span>Loading friends...</span></div>';
+  if ($groupEditorMemberSearch) $groupEditorMemberSearch.value = '';
+
+  try {
+    const { friends } = await api.getFriends();
+    if (friends.length === 0) {
+      $groupEditorMembers.innerHTML = '<p class="picker__empty">Add some friends first.</p>';
+      return;
+    }
+    $groupEditorMembers.innerHTML = '';
+    friends.forEach((f) => {
+      const item = document.createElement('label');
+      item.className = 'picker__friend';
+      item.dataset.username = f.user.username.toLowerCase();
+      const checked = groupEditorMembers.has(f.user.id) ? 'checked' : '';
+      item.innerHTML = `
+        <input type="checkbox" class="picker__checkbox" value="${escapeAttr(f.user.id)}" ${checked}>
+        ${avatarHtml(f.user.username, f.user.avatarKey, 'sm', f.user.avatarUrl)}
+        <span class="picker__name">${escapeHtml(f.user.username)}</span>
+      `;
+      const cb = item.querySelector('input');
+      cb.addEventListener('change', () => {
+        if (cb.checked) groupEditorMembers.add(f.user.id);
+        else            groupEditorMembers.delete(f.user.id);
+      });
+      $groupEditorMembers.appendChild(item);
+    });
+  } catch (err) {
+    $groupEditorMembers.innerHTML = `<p class="picker__empty">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function closeGroupEditor() {
+  $groupEditor.hidden = true;
+  editingGroup = null;
+  groupEditorMembers.clear();
+}
+
+$newGroupBtn.addEventListener('click', () => openGroupEditor(null));
+$groupEditorClose.addEventListener('click', closeGroupEditor);
+
+if ($groupEditorMemberSearch) {
+  $groupEditorMemberSearch.addEventListener('input', () => {
+    const q = $groupEditorMemberSearch.value.trim().toLowerCase();
+    $groupEditorMembers.querySelectorAll('.picker__friend').forEach((row) => {
+      const u = row.dataset.username || '';
+      row.hidden = q && !u.includes(q);
+    });
+  });
+}
+$groupEditor.addEventListener('click', (e) => { if (e.target === $groupEditor) closeGroupEditor(); });
+
+$groupEditorSave.addEventListener('click', async () => {
+  const name = $groupEditorName.value.trim();
+  if (!name) {
+    $groupEditorError.textContent = 'Name required';
+    $groupEditorError.hidden = false;
+    return;
+  }
+  $groupEditorError.hidden = true;
+  $groupEditorSave.disabled = true;
+  $groupEditorSave.textContent = 'Saving...';
+
+  try {
+    let groupId;
+    if (editingGroup) {
+      groupId = editingGroup.id;
+      const changed =
+        name !== editingGroup.name ||
+        groupEditorColor !== editingGroup.color ||
+        groupEditorAvatarKey !== editingGroup.avatarKey;
+      if (changed) {
+        await api.updateGroup(groupId, { name, color: groupEditorColor, avatarKey: groupEditorAvatarKey });
+      }
+    } else {
+      const { group } = await api.createGroup(name, { color: groupEditorColor, avatarKey: groupEditorAvatarKey });
+      groupId = group.id;
+    }
+    await api.setGroupMembers(groupId, [...groupEditorMembers]);
+    showToast(editingGroup ? 'Group saved' : 'Group created', 'success');
+    closeGroupEditor();
+    loadGroups();
+  } catch (err) {
+    $groupEditorError.textContent = err.message;
+    $groupEditorError.hidden = false;
+  } finally {
+    $groupEditorSave.disabled = false;
+    $groupEditorSave.textContent = 'Save';
+  }
+});
+
+$groupEditorDelete.addEventListener('click', async () => {
+  if (!editingGroup) return;
+  if (!confirm(`Delete group "${editingGroup.name}"? All conversation history stays in members' inboxes but the group disappears.`)) return;
+  $groupEditorDelete.disabled = true;
+  try {
+    await api.deleteGroup(editingGroup.id);
+    showToast('Group deleted', 'success');
+    closeGroupEditor();
+    loadGroups();
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    $groupEditorDelete.disabled = false;
+  }
+});
+
+// ============================================================
+//  SAVED VIEW (personal bookmark archive)
+// ============================================================
+
+const $savedLoading  = document.getElementById('saved-loading');
+const $savedList     = document.getElementById('saved-list');
+const $savedLoadMore = document.getElementById('saved-load-more');
+const $savedForm     = document.getElementById('saved-form');
+const $savedUrlInput = document.getElementById('saved-url-input');
+const $savedNoteInput = document.getElementById('saved-note-input');
+const $savedAddBtn   = document.getElementById('saved-add-btn');
+const $savedFormError = document.getElementById('saved-form-error');
+
+let savedCursor = null;
+let isSavedLoadingMore = false;
+
+async function loadBookmarks(append = false) {
+  if (!append) {
+    $savedLoading.hidden = false;
+    $savedList.innerHTML = '';
+    savedCursor = null;
+  }
+
+  try {
+    const { bookmarks, nextCursor } = await api.listBookmarks(append ? savedCursor : undefined);
+    savedCursor = nextCursor;
+
+    if (!append && bookmarks.length === 0) {
+      $savedList.innerHTML = `
+        <li class="feed__empty-state">
+          <svg class="feed__empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/>
+          </svg>
+          <p class="feed__empty-title">Nothing saved yet</p>
+          <p class="feed__empty-text">Save links from your inbox, or paste one above</p>
+        </li>`;
+    } else {
+      bookmarks.forEach(renderBookmarkItem);
+    }
+
+    $savedLoadMore.hidden = !nextCursor;
+  } catch (err) {
+    if (!append) {
+      $savedList.innerHTML = `
+        <li class="feed__error-state">
+          <p class="feed__error-text">${escapeHtml(err.message)}</p>
+          <button class="btn btn--ghost" id="saved-retry">Try again</button>
+        </li>`;
+      document.getElementById('saved-retry')?.addEventListener('click', () => loadBookmarks());
+    }
+    showError(err.message);
+  } finally {
+    $savedLoading.hidden = true;
+    isSavedLoadingMore = false;
+    $savedLoadMore.disabled = false;
+    $savedLoadMore.textContent = 'Load more';
+  }
+}
+
+function renderBookmarkItem(b) {
+  const preview = buildLinkPreview(b.url);
+  const li = document.createElement('li');
+  li.className = 'preview-card';
+  li.dataset.bookmarkId = b.id;
+
+  const displayTitle = b.ogTitle || b.title;
+  const displayUrl = truncateUrl(b.url, 55);
+  const time = timeAgo(b.savedAt);
+
+  li.innerHTML = `
+    <div class="preview-card__header">
+      ${buildPlatformBadge(preview)}
+      <div class="preview-card__header-actions">
+        <button class="preview-card__icon-btn" title="Remove" data-bookmark-delete="${escapeAttr(b.id)}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 01-2 2H9a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+        </button>
+      </div>
+    </div>
+    ${displayTitle ? `<p class="preview-card__title">${escapeHtml(displayTitle)}</p>` : ''}
+    ${b.note ? `<p class="preview-card__note">${escapeHtml(b.note)}</p>` : ''}
+    <a class="preview-card__url-link" href="${escapeAttr(b.url)}" target="_blank" rel="noopener">${escapeHtml(displayUrl)}</a>
+    <div class="preview-card__footer">
+      <span class="preview-card__time">Saved ${time}</span>
+    </div>
+  `;
+  $savedList.appendChild(li);
+}
+
+$savedList.addEventListener('click', async (e) => {
+  const delBtn = e.target.closest('[data-bookmark-delete]');
+  if (!delBtn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const id = delBtn.dataset.bookmarkDelete;
+  const card = delBtn.closest('.preview-card');
+  try {
+    await api.deleteBookmark(id);
+    card.style.transition = 'opacity 0.2s, transform 0.2s';
+    card.style.opacity = '0';
+    card.style.transform = 'translateX(20px)';
+    setTimeout(() => {
+      card.remove();
+      if ($savedList.children.length === 0) loadBookmarks();
+    }, 200);
+    showToast('Removed', 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+});
+
+$savedLoadMore.addEventListener('click', () => {
+  if (isSavedLoadingMore) return;
+  isSavedLoadingMore = true;
+  $savedLoadMore.disabled = true;
+  $savedLoadMore.textContent = 'Loading...';
+  loadBookmarks(true);
+});
+
+$savedForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const url = $savedUrlInput.value.trim();
+  if (!isValidUrl(url)) {
+    $savedFormError.textContent = 'Enter a valid URL';
+    $savedFormError.hidden = false;
+    return;
+  }
+  $savedFormError.hidden = true;
+  $savedAddBtn.disabled = true;
+  try {
+    const preview = buildLinkPreview(url);
+    await api.saveBookmark(url, {
+      note: $savedNoteInput.value.trim() || undefined,
+      platform: preview.platform?.id || undefined,
+      title: preview.sublabel || undefined,
+    });
+    $savedUrlInput.value = '';
+    $savedNoteInput.value = '';
+    showToast('Saved', 'success');
+    loadBookmarks();
+  } catch (err) {
+    $savedFormError.textContent = err.message;
+    $savedFormError.hidden = false;
+  } finally {
+    $savedAddBtn.disabled = false;
+  }
+});
 
 // ============================================================
 //  BOOT

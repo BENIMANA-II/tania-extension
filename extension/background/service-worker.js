@@ -41,7 +41,10 @@ async function setSession(session) {
 }
 
 async function clearSession() {
-  await chrome.storage.local.remove(['accessToken', 'refreshToken', 'expiresAt', 'user']);
+  await chrome.storage.local.remove([
+    'accessToken', 'refreshToken', 'expiresAt', 'user',
+    'lastNotifiedAt', 'lastGroupNotifiedAt',
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +249,8 @@ async function pollUnreadCount() {
     }
     const unread = await rpc('unread_share_count');
     setBadge(unread || 0);
+    if ((unread || 0) > 0) await notifyNewShares();
+    await notifyNewGroupInvites();
   } catch (err) {
     if (err.message === 'Session expired') {
       clearBadge();
@@ -254,6 +259,98 @@ async function pollUnreadCount() {
     // Network errors fall through silently — next alarm will retry
   }
 }
+
+// ---------------------------------------------------------------------------
+// New-share notifications
+// ---------------------------------------------------------------------------
+// On every poll where unread > 0, fetch the most recent feed page and fire
+// a system notification for any share with sharedAt > lastNotifiedAt.
+// First poll after install/sign-in seeds lastNotifiedAt without firing —
+// otherwise we'd notify retroactively for every existing unread share.
+
+async function notifyNewShares() {
+  const { notificationsEnabled = true, lastNotifiedAt } =
+    await chrome.storage.local.get(['notificationsEnabled', 'lastNotifiedAt']);
+
+  if (notificationsEnabled === false) return;
+
+  const rows = await rpc('get_feed', { after: null, page_size: 5 });
+  if (!rows || rows.length === 0) return;
+
+  // Seed on first run: record the newest share without notifying.
+  if (!lastNotifiedAt) {
+    const newest = rows.reduce((a, b) => (a.shared_at > b.shared_at ? a : b)).shared_at;
+    await chrome.storage.local.set({ lastNotifiedAt: newest });
+    return;
+  }
+
+  const fresh = rows
+    .filter((r) => r.shared_at > lastNotifiedAt && r.read === false)
+    .sort((a, b) => (a.shared_at < b.shared_at ? -1 : 1));
+
+  for (const r of fresh) {
+    const title = `${r.sender_username} shared a link`;
+    const body  = r.note || r.og_title || r.title || r.url;
+    chrome.notifications.create(`tania-share-${r.id}`, {
+      type:     'basic',
+      iconUrl:  chrome.runtime.getURL('icons/icon-128.png'),
+      title,
+      message:  String(body).slice(0, 200),
+      priority: 0,
+    });
+  }
+
+  if (fresh.length > 0) {
+    const newest = fresh[fresh.length - 1].shared_at;
+    await chrome.storage.local.set({ lastNotifiedAt: newest });
+  }
+}
+
+async function notifyNewGroupInvites() {
+  const { notificationsEnabled = true, lastGroupNotifiedAt } =
+    await chrome.storage.local.get(['notificationsEnabled', 'lastGroupNotifiedAt']);
+  if (notificationsEnabled === false) return;
+
+  const rows = await rpc('list_new_group_memberships', { after: lastGroupNotifiedAt || null });
+  if (!rows || rows.length === 0) return;
+
+  if (!lastGroupNotifiedAt) {
+    const newest = rows.reduce((a, b) => (a.joined_at > b.joined_at ? a : b)).joined_at;
+    await chrome.storage.local.set({ lastGroupNotifiedAt: newest });
+    return;
+  }
+
+  const fresh = rows
+    .filter((r) => r.joined_at > lastGroupNotifiedAt)
+    .sort((a, b) => (a.joined_at < b.joined_at ? -1 : 1));
+
+  for (const r of fresh) {
+    chrome.notifications.create(`tania-group-${r.group_id}`, {
+      type:     'basic',
+      iconUrl:  chrome.runtime.getURL('icons/icon-128.png'),
+      title:    'Added to a group',
+      message:  `You were added to "${r.group_name}".`,
+      priority: 0,
+    });
+  }
+
+  if (fresh.length > 0) {
+    const newest = fresh[fresh.length - 1].joined_at;
+    await chrome.storage.local.set({ lastGroupNotifiedAt: newest });
+  }
+}
+
+chrome.notifications.onClicked.addListener(async (notificationId) => {
+  chrome.notifications.clear(notificationId);
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id != null) {
+      await chrome.sidePanel.open({ tabId: tab.id });
+    }
+  } catch {
+    // Side panel open may fail outside a user gesture in some chromium builds.
+  }
+});
 
 function setBadge(count) {
   if (count > 0) {
