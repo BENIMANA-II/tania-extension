@@ -361,6 +361,27 @@ export const api = {
     return { friends, pendingIncoming, pendingOutgoing };
   },
 
+  async listMyFriends({ q, after, pageSize } = {}) {
+    const rows = await rpc('list_my_friends', {
+      q:         q || null,
+      after:     after || null,
+      page_size: pageSize || 5,
+    });
+    return {
+      friends: (rows || []).map((r) => ({
+        id: r.friendship_id,
+        user: {
+          id:        r.user_id,
+          username:  r.username,
+          avatarKey: r.avatar_key,
+          avatarUrl: r.avatar_url,
+        },
+        since:       r.since,
+        mutualCount: r.mutual_count || 0,
+      })),
+    };
+  },
+
   async searchUsers(q) {
     if (!q || q.trim().length < 1) return { users: [] };
     const rows = await rpc('search_users_v2', { q: q.trim() });
@@ -417,8 +438,11 @@ export const api = {
 
   // ---- Conversations (inbox grouped by peer / group) ----
 
-  async getConversations() {
-    const rows = await rpc('get_conversations');
+  async getConversations({ after, pageSize } = {}) {
+    const rows = await rpc('get_conversations', {
+      after:     after || null,
+      page_size: pageSize || 5,
+    });
     return {
       conversations: (rows || []).map((r) => ({
         kind:         r.kind,

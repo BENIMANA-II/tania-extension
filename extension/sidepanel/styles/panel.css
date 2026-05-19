@@ -1237,6 +1237,51 @@ body {
   margin-top: 1px;
 }
 
+.friend-row__text { display: flex; flex-direction: column; min-width: 0; }
+
+.friend-row__mutuals {
+  font-size: 10.5px;
+  color: var(--color-accent);
+  margin-top: 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.friends-list__sentinel,
+.conversations-list__sentinel {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 10px 0;
+  list-style: none;
+}
+.friends-list__sentinel .spinner,
+.conversations-list__sentinel .spinner {
+  width: 16px;
+  height: 16px;
+}
+
+/* Thread header share button */
+.thread-header__share {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+  flex-shrink: 0;
+}
+.thread-header__share:hover {
+  background: var(--color-accent);
+  color: #fff;
+}
+
 .friend-row__status {
   font-size: 11px;
   color: var(--color-text-muted);

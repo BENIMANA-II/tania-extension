@@ -119,9 +119,14 @@ const $conversationsSearch = document.getElementById('conversations-search');
 
 // --- DOM: Thread ---
 
-const $threadBack      = document.getElementById('thread-back');
-const $threadHeader    = document.getElementById('thread-header-info');
-const $threadMessages  = document.getElementById('thread-messages');
+const $threadBack       = document.getElementById('thread-back');
+const $threadHeader     = document.getElementById('thread-header-info');
+const $threadMessages   = document.getElementById('thread-messages');
+const $threadShareToggle = document.getElementById('thread-share-toggle');
+const $threadShareForm  = document.getElementById('thread-share-form');
+const $threadUrlInput   = document.getElementById('thread-url-input');
+const $threadNoteInput  = document.getElementById('thread-note-input');
+const $threadShareBtn   = document.getElementById('thread-share-btn');
 
 // --- DOM: Friends ---
 
@@ -166,6 +171,8 @@ const $pickerSend        = document.getElementById('picker-send');
 window.addEventListener('tania:session-expired', () => {
   currentUser = null;
   conversationsCache = [];
+  conversationsCursor = null;
+  conversationsAtEnd = false;
   $conversationsList.innerHTML = '';
   showLogin();
   showToast('Session expired. Please sign in again.', 'error');
@@ -358,6 +365,9 @@ async function logout() {
   await clearAuth();
   currentUser = null;
   conversationsCache = [];
+  conversationsCursor = null;
+  conversationsAtEnd = false;
+  conversationsLoading = false;
   currentThread = null;
   resetViewState();
 
@@ -384,6 +394,10 @@ function resetViewState() {
   $friendsSearch.value = '';
   if ($addFriendResults) { $addFriendResults.innerHTML = ''; $addFriendResults.hidden = true; }
   cachedFriendRows = [];
+  friendsListCursor = null;
+  friendsListAtEnd = false;
+  friendsListLoading = false;
+  friendsCurrentQuery = '';
   pendingRequestCount = 0;
   renderPendingBadge();
 
@@ -398,10 +412,14 @@ function resetViewState() {
   if ($savedList) {
     $savedList.innerHTML = '';
     $savedLoadMore.hidden = true;
+    savedCursor = null;
+  }
+  if ($savedUrlInput) {
     $savedUrlInput.value = '';
     $savedNoteInput.value = '';
+    $savedNoteInput.hidden = true;
+    $savedAddBtn.hidden = true;
     $savedFormError.hidden = true;
-    savedCursor = null;
   }
 
   // Settings
@@ -661,19 +679,59 @@ function groupAvatarHtml(group, size = 'md') {
   return `<span class="avatar avatar--${size} avatar--group" style="background:${escapeAttr(group.color || '#6366f1')}"><span class="avatar__initial">${escapeHtml((group.name || '?')[0].toUpperCase())}</span></span>`;
 }
 
-async function loadConversations() {
-  $conversationsLoading.hidden = false;
+let conversationsCursor = null;
+let conversationsAtEnd = false;
+let conversationsLoading = false;
+let conversationsObserver = null;
+const CONVERSATIONS_PAGE_SIZE = 5;
+
+async function loadConversations({ reset = true } = {}) {
+  if (conversationsLoading) return;
+  conversationsLoading = true;
+  if (reset) $conversationsLoading.hidden = false;
+
   try {
-    const { conversations } = await api.getConversations();
-    conversationsCache = conversations;
-    renderConversationsList();
+    const cursor = reset ? null : conversationsCursor;
+    const { conversations } = await api.getConversations({
+      after:    cursor,
+      pageSize: CONVERSATIONS_PAGE_SIZE,
+    });
     hideError();
+
+    if (reset) conversationsCache = [];
+    conversationsCache.push(...conversations);
+
+    if (conversations.length > 0) {
+      conversationsCursor = conversations[conversations.length - 1].lastAt;
+    }
+    conversationsAtEnd = conversations.length < CONVERSATIONS_PAGE_SIZE;
+
+    renderConversationsList();
+    ensureConversationsScrollSentinel();
     refreshUnreadCount();
   } catch (err) {
     showError(err.message);
   } finally {
     $conversationsLoading.hidden = true;
+    conversationsLoading = false;
   }
+}
+
+function ensureConversationsScrollSentinel() {
+  $conversationsList.querySelectorAll('.conversations-list__sentinel').forEach((s) => s.remove());
+  if (conversationsAtEnd) return;
+  const sentinel = document.createElement('li');
+  sentinel.className = 'conversations-list__sentinel';
+  sentinel.innerHTML = '<div class="spinner"></div>';
+  $conversationsList.appendChild(sentinel);
+  if (!conversationsObserver) {
+    conversationsObserver = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting) loadConversations({ reset: false });
+      }
+    }, { root: null, rootMargin: '160px' });
+  }
+  conversationsObserver.observe(sentinel);
 }
 
 function conversationsMatch(c, q) {
@@ -755,6 +813,7 @@ async function openConversation(conv) {
   currentThread = conv;
   $viewInbox.hidden = true;
   $viewThread.hidden = false;
+  closeThreadShareForm();
   renderThreadHeader(conv);
   $threadMessages.innerHTML = '<div class="feed__loading"><div class="spinner"></div><span>Loading...</span></div>';
 
@@ -943,12 +1002,71 @@ $threadBack.addEventListener('click', () => {
   $viewThread.hidden = true;
   $viewInbox.hidden = false;
   currentThread = null;
+  closeThreadShareForm();
   loadConversations();
 });
 
-// The bottom "paste a link" composer was removed by design — once a chat
-// exists, the only input is the per-message Reply field. New conversations
-// start via the Inbox drop-zone + friend/group picker flow.
+// In-chat share composer — hidden by default, toggled by the + button in the
+// thread header. Note field + Send button reveal progressively after a valid
+// URL is typed (mirrors the Saved-tab pattern). Submits into currentThread.
+
+function closeThreadShareForm() {
+  $threadShareForm.hidden = true;
+  $threadUrlInput.value = '';
+  $threadNoteInput.value = '';
+  $threadNoteInput.hidden = true;
+  $threadShareBtn.hidden = true;
+}
+
+function refreshThreadShareFormState() {
+  const url = $threadUrlInput.value.trim();
+  const valid = isValidUrl(url);
+  $threadNoteInput.hidden = !valid;
+  $threadShareBtn.hidden = !valid;
+  if (!valid) $threadNoteInput.value = '';
+}
+
+$threadShareToggle.addEventListener('click', () => {
+  if ($threadShareForm.hidden) {
+    $threadShareForm.hidden = false;
+    setTimeout(() => $threadUrlInput.focus(), 30);
+  } else {
+    closeThreadShareForm();
+  }
+});
+
+$threadUrlInput.addEventListener('input', refreshThreadShareFormState);
+
+$threadShareForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!currentThread) return;
+  const url = $threadUrlInput.value.trim();
+  if (!isValidUrl(url)) {
+    showToast('Enter a valid URL', 'error');
+    return;
+  }
+  $threadShareBtn.disabled = true;
+  try {
+    const preview = buildLinkPreview(url);
+    await api.share(
+      url,
+      currentThread.kind === 'peer' ? [currentThread.peer.id] : null,
+      {
+        note:     $threadNoteInput.value.trim() || undefined,
+        platform: preview.platform?.id || undefined,
+        title:    preview.sublabel || undefined,
+        groupId:  currentThread.kind === 'group' ? currentThread.group.id : undefined,
+      }
+    );
+    closeThreadShareForm();
+    showToast('Shared', 'success');
+    openConversation(currentThread); // reload thread to show the new message
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    $threadShareBtn.disabled = false;
+  }
+});
 
 // --- Polling ---
 
@@ -972,25 +1090,124 @@ function stopPolling() {
 //  FRIENDS VIEW
 // ============================================================
 
-let cachedFriendRows = []; // Store rendered rows for search filtering
+let cachedFriendRows = [];           // rendered friend-row elements
+let friendsListCursor = null;        // `since` of the last loaded friend
+let friendsListLoading = false;
+let friendsListAtEnd = false;
+let friendsCurrentQuery = '';
+let friendsScrollObserver = null;
+const FRIENDS_PAGE_SIZE = 5;
+
+function friendRowHtml(f) {
+  const mutualLabel = f.mutualCount > 0
+    ? `<span class="friend-row__mutuals">${f.mutualCount} mutual friend${f.mutualCount === 1 ? '' : 's'}</span>`
+    : '';
+  return `
+    <div class="friend-row__info">
+      ${avatarHtml(f.user.username, f.user.avatarKey, 'sm', f.user.avatarUrl)}
+      <div class="friend-row__text">
+        <span class="friend-row__name">${escapeHtml(f.user.username)}</span>
+        <span class="friend-row__since">Friends since ${new Date(f.since).toLocaleDateString()}</span>
+        ${mutualLabel}
+      </div>
+    </div>
+  `;
+}
+
+function renderFriendRow(f) {
+  const li = document.createElement('li');
+  li.className = 'friend-row';
+  li.dataset.username = f.user.username.toLowerCase();
+  li.innerHTML = friendRowHtml(f);
+  return li;
+}
+
+function showFriendsEmpty(reason = 'none') {
+  $friendsList.innerHTML = `
+    <li class="feed__empty-state">
+      <svg class="feed__empty-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/>
+        <path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/>
+      </svg>
+      <p class="feed__empty-title">${reason === 'search' ? 'No matches' : 'No friends yet'}</p>
+      <p class="feed__empty-text">${reason === 'search' ? 'Try a different search' : 'Search above to add one'}</p>
+    </li>`;
+}
+
+async function loadMoreFriends({ reset = false } = {}) {
+  if (friendsListLoading) return;
+  if (!reset && friendsListAtEnd) return;
+  friendsListLoading = true;
+
+  if (reset) {
+    friendsListCursor = null;
+    friendsListAtEnd = false;
+    cachedFriendRows = [];
+    $friendsList.innerHTML = '';
+  }
+
+  try {
+    const { friends } = await api.listMyFriends({
+      q:        friendsCurrentQuery || null,
+      after:    friendsListCursor,
+      pageSize: FRIENDS_PAGE_SIZE,
+    });
+
+    friends.forEach((f) => {
+      const li = renderFriendRow(f);
+      $friendsList.appendChild(li);
+      cachedFriendRows.push(li);
+    });
+
+    if (friends.length > 0) {
+      friendsListCursor = friends[friends.length - 1].since;
+    }
+    if (friends.length < FRIENDS_PAGE_SIZE) friendsListAtEnd = true;
+
+    if (cachedFriendRows.length === 0) {
+      showFriendsEmpty(friendsCurrentQuery ? 'search' : 'none');
+    } else {
+      ensureFriendsScrollSentinel();
+    }
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    friendsListLoading = false;
+  }
+}
+
+function ensureFriendsScrollSentinel() {
+  // Remove any prior sentinel.
+  $friendsList.querySelectorAll('.friends-list__sentinel').forEach((s) => s.remove());
+  if (friendsListAtEnd) return;
+  const sentinel = document.createElement('li');
+  sentinel.className = 'friends-list__sentinel';
+  sentinel.innerHTML = '<div class="spinner"></div>';
+  $friendsList.appendChild(sentinel);
+  if (!friendsScrollObserver) {
+    friendsScrollObserver = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting) loadMoreFriends();
+      }
+    }, { root: null, rootMargin: '120px' });
+  }
+  friendsScrollObserver.observe(sentinel);
+}
 
 async function loadFriends() {
   $friendsLoading.hidden = false;
-  $friendsList.innerHTML = '';
   $pendingList.innerHTML = '';
   $outgoingList.innerHTML = '';
   $friendsSearch.value = '';
-  cachedFriendRows = [];
+  friendsCurrentQuery = '';
 
   try {
-    const { friends, pendingIncoming, pendingOutgoing } = await api.getFriends();
+    const { pendingIncoming, pendingOutgoing } = await api.getFriends();
     hideError();
 
-    // Update pending badge
     pendingRequestCount = pendingIncoming.length;
     renderPendingBadge();
 
-    // --- Pending incoming ---
     if (pendingIncoming.length > 0) {
       $pendingSection.hidden = false;
       $pendingCount.textContent = pendingIncoming.length;
@@ -1012,7 +1229,6 @@ async function loadFriends() {
       $pendingSection.hidden = true;
     }
 
-    // --- Pending outgoing ---
     if (pendingOutgoing.length > 0) {
       $outgoingSection.hidden = false;
       pendingOutgoing.forEach((req) => {
@@ -1031,37 +1247,8 @@ async function loadFriends() {
       $outgoingSection.hidden = true;
     }
 
-    // --- Accepted friends ---
-    $friendsCount.textContent = friends.length || '';
-
-    if (friends.length === 0) {
-      $friendsList.innerHTML = `
-        <li class="feed__empty-state">
-          <svg class="feed__empty-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/>
-            <path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/>
-          </svg>
-          <p class="feed__empty-title">No friends yet</p>
-          <p class="feed__empty-text">Add a friend above to start sharing</p>
-        </li>`;
-    } else {
-      friends.forEach((f) => {
-        const li = document.createElement('li');
-        li.className = 'friend-row';
-        li.dataset.username = f.user.username.toLowerCase();
-        li.innerHTML = `
-          <div class="friend-row__info">
-            ${avatarHtml(f.user.username, f.user.avatarKey, 'sm', f.user.avatarUrl)}
-            <div>
-              <span class="friend-row__name">${escapeHtml(f.user.username)}</span>
-              <span class="friend-row__since">Friends since ${new Date(f.since).toLocaleDateString()}</span>
-            </div>
-          </div>
-        `;
-        $friendsList.appendChild(li);
-        cachedFriendRows.push(li);
-      });
-    }
+    $friendsCount.textContent = '';
+    await loadMoreFriends({ reset: true });
   } catch (err) {
     $friendsList.innerHTML = `
       <li class="feed__error-state">
@@ -1097,24 +1284,27 @@ let friendsSearchTimer = null;
 let friendsSearchSeq = 0;
 
 $friendsSearch.addEventListener('input', () => {
-  const query = $friendsSearch.value.trim().toLowerCase();
-
-  // Filter existing friend rows in place.
-  for (const row of cachedFriendRows) {
-    const username = row.dataset.username || '';
-    row.hidden = query && !username.includes(query);
-  }
+  const query = $friendsSearch.value.trim();
   $inviteStatus.hidden = true;
 
-  // Look up non-friend matches to offer "Add" buttons.
+  // Server-side search of my friends — reset pagination on each keystroke
+  // (debounced) so the list always reflects the full match set.
   clearTimeout(friendsSearchTimer);
-  if (query.length < 1) {
+  friendsCurrentQuery = query.toLowerCase();
+
+  if (query.length === 0) {
     $addFriendResults.innerHTML = '';
     $addFriendResults.hidden = true;
+    loadMoreFriends({ reset: true });
     return;
   }
+
   const mySeq = ++friendsSearchSeq;
   friendsSearchTimer = setTimeout(async () => {
+    if (mySeq !== friendsSearchSeq) return;
+    // Refresh friends list (server-side, paginated)
+    loadMoreFriends({ reset: true });
+    // Look up non-friend matches in parallel for the "Add new" card.
     try {
       const { users } = await api.searchUsers(query);
       if (mySeq !== friendsSearchSeq) return;
@@ -1857,10 +2047,10 @@ $groupEditorDelete.addEventListener('click', async () => {
 const $savedLoading  = document.getElementById('saved-loading');
 const $savedList     = document.getElementById('saved-list');
 const $savedLoadMore = document.getElementById('saved-load-more');
-const $savedForm     = document.getElementById('saved-form');
-const $savedUrlInput = document.getElementById('saved-url-input');
+const $savedForm      = document.getElementById('saved-form');
+const $savedUrlInput  = document.getElementById('saved-url-input');
 const $savedNoteInput = document.getElementById('saved-note-input');
-const $savedAddBtn   = document.getElementById('saved-add-btn');
+const $savedAddBtn    = document.getElementById('saved-add-btn');
 const $savedFormError = document.getElementById('saved-form-error');
 
 let savedCursor = null;
@@ -1968,6 +2158,23 @@ $savedLoadMore.addEventListener('click', () => {
   loadBookmarks(true);
 });
 
+// ============================================================
+//  SAVED FORM (progressive: paste URL → reveal note + save)
+// ============================================================
+
+function refreshSavedFormState() {
+  const url = $savedUrlInput.value.trim();
+  const valid = isValidUrl(url);
+  $savedNoteInput.hidden = !valid;
+  $savedAddBtn.hidden = !valid;
+  if (!valid) {
+    $savedNoteInput.value = '';
+    $savedFormError.hidden = true;
+  }
+}
+
+$savedUrlInput.addEventListener('input', refreshSavedFormState);
+
 $savedForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const url = $savedUrlInput.value.trim();
@@ -1981,12 +2188,13 @@ $savedForm.addEventListener('submit', async (e) => {
   try {
     const preview = buildLinkPreview(url);
     await api.saveBookmark(url, {
-      note: $savedNoteInput.value.trim() || undefined,
+      note:     $savedNoteInput.value.trim() || undefined,
       platform: preview.platform?.id || undefined,
-      title: preview.sublabel || undefined,
+      title:    preview.sublabel || undefined,
     });
     $savedUrlInput.value = '';
     $savedNoteInput.value = '';
+    refreshSavedFormState();
     showToast('Saved', 'success');
     loadBookmarks();
   } catch (err) {

@@ -413,6 +413,10 @@ grant execute on function public.reply_counts_for_shares(uuid[]) to authenticate
 -- Groups RPCs
 -- ===========================================================================
 
+-- DROP first: re-runs of this migration may have already installed the
+-- later (avatar_url-extended) shape — `create or replace` can't change a
+-- function's return columns, so the bare CREATE here would fail.
+drop function if exists public.get_groups_view();
 create or replace function public.get_groups_view()
 returns table (
   id           uuid,
@@ -607,6 +611,7 @@ create policy share_recipients_insert_friend_or_group
 -- ===========================================================================
 -- One row per conversation (peer or group), ordered by last activity desc.
 
+drop function if exists public.get_conversations();
 create or replace function public.get_conversations()
 returns table (
   kind             text,         -- 'peer' | 'group'
@@ -687,6 +692,7 @@ grant execute on function public.get_conversations() to authenticated;
 -- Conversation thread — every share in one 1-1 or group conversation
 -- ===========================================================================
 
+drop function if exists public.get_conversation_thread(uuid, uuid, int);
 create or replace function public.get_conversation_thread(
   p_peer_id  uuid default null,
   p_group_id uuid default null,
@@ -786,6 +792,7 @@ grant execute on function public.mark_conversation_read(uuid, uuid) to authentic
 -- Better friend search: prefix-ranked, larger limit, mutual count
 -- ===========================================================================
 
+drop function if exists public.search_users_v2(text);
 create or replace function public.search_users_v2(q text)
 returns table (
   id              uuid,
@@ -1260,3 +1267,170 @@ as $$
 $$;
 
 grant execute on function public.list_new_group_memberships(timestamptz) to authenticated;
+
+-- ===========================================================================
+-- Mutual friends helper + paginated friends list
+-- ===========================================================================
+-- mutual_friends_count(other_id) — # of accepted-friend users that the
+-- caller and `other_id` share. Used by friend rows + search results.
+
+create or replace function public.mutual_friends_count(p_other_id uuid)
+returns int
+language sql security invoker set search_path = public stable
+as $$
+  select count(*)::int
+  from public.friendships f1
+  join public.friendships f2
+    on case when f1.requester_id = auth.uid() then f1.addressee_id else f1.requester_id end
+     = case when f2.requester_id = p_other_id then f2.addressee_id else f2.requester_id end
+  where (f1.requester_id = auth.uid() or f1.addressee_id = auth.uid())
+    and (f2.requester_id = p_other_id or f2.addressee_id = p_other_id)
+    and f1.status = 'accepted'
+    and f2.status = 'accepted';
+$$;
+
+grant execute on function public.mutual_friends_count(uuid) to authenticated;
+
+-- list_my_friends(q, after, page_size) — paginated accepted-friends list,
+-- optionally filtered by a substring of username (server-side search so
+-- it works across the user's entire friends list, not just the loaded
+-- page). Cursor: `since` of the last row from the previous page.
+
+create or replace function public.list_my_friends(
+  q          text         default null,
+  after      timestamptz  default null,
+  page_size  int          default 5
+)
+returns table (
+  friendship_id uuid,
+  user_id       uuid,
+  username      varchar,
+  avatar_key    varchar,
+  avatar_url    text,
+  since         timestamptz,
+  mutual_count  int
+)
+language sql security invoker set search_path = public stable
+as $$
+  with my_friends as (
+    select
+      f.id as friendship_id,
+      case when f.requester_id = auth.uid()
+           then f.addressee_id else f.requester_id end as peer_id,
+      f.created_at
+    from public.friendships f
+    where (f.requester_id = auth.uid() or f.addressee_id = auth.uid())
+      and f.status = 'accepted'
+  )
+  select
+    mf.friendship_id,
+    p.id          as user_id,
+    p.username,
+    p.avatar_key,
+    p.avatar_url,
+    mf.created_at as since,
+    public.mutual_friends_count(p.id) as mutual_count
+  from my_friends mf
+  join public.profiles p on p.id = mf.peer_id
+  where (q is null or char_length(q) = 0 or lower(p.username) like '%' || lower(q) || '%')
+    and (after is null or mf.created_at < after)
+  order by mf.created_at desc
+  limit greatest(1, least(page_size, 50));
+$$;
+
+grant execute on function public.list_my_friends(text, timestamptz, int) to authenticated;
+
+-- ===========================================================================
+-- Paginated get_conversations
+-- ===========================================================================
+-- Same shape as the v2.2 version (peer/group rows with avatar_url) but
+-- now keyset-paginated by `last_at`. Cursor: the previous page's last_at.
+
+drop function if exists public.get_conversations();
+drop function if exists public.get_conversations(timestamptz, int);
+
+create or replace function public.get_conversations(
+  after      timestamptz default null,
+  page_size  int         default 5
+)
+returns table (
+  kind             text,
+  peer_id          uuid,
+  peer_username    varchar,
+  peer_avatar_key  varchar,
+  peer_avatar_url  text,
+  group_id         uuid,
+  group_name       varchar,
+  group_color      varchar,
+  group_avatar_key varchar,
+  group_avatar_url text,
+  last_share_id    uuid,
+  last_snippet     text,
+  last_sender_id   uuid,
+  last_at          timestamptz,
+  unread_count     int
+)
+language sql security invoker set search_path = public stable
+as $$
+  with peer_rows as (
+    select
+      case when s.sender_id = auth.uid() then sr.recipient_id else s.sender_id end as peer_id,
+      s.id, s.sender_id, s.created_at,
+      coalesce(s.note, s.og_title, s.title, s.url) as snippet,
+      case when sr.recipient_id = auth.uid() and sr.read = false then 1 else 0 end as is_unread
+    from public.shares s
+    join public.share_recipients sr on sr.share_id = s.id
+    where s.group_id is null
+      and (s.sender_id = auth.uid() or sr.recipient_id = auth.uid())
+  ),
+  peer_agg as (
+    select peer_id,
+           max(created_at) as last_at,
+           (array_agg(id          order by created_at desc))[1] as last_share_id,
+           (array_agg(snippet     order by created_at desc))[1] as last_snippet,
+           (array_agg(sender_id   order by created_at desc))[1] as last_sender_id,
+           sum(is_unread)::int as unread_count
+    from peer_rows
+    group by peer_id
+  ),
+  group_rows as (
+    select s.group_id, s.id, s.sender_id, s.created_at,
+           coalesce(s.note, s.og_title, s.title, s.url) as snippet,
+           case when sr.recipient_id is not null and sr.read = false then 1 else 0 end as is_unread
+    from public.shares s
+    join public.group_members gm
+      on gm.group_id = s.group_id and gm.member_id = auth.uid()
+    left join public.share_recipients sr
+      on sr.share_id = s.id and sr.recipient_id = auth.uid()
+    where s.group_id is not null
+  ),
+  group_agg as (
+    select group_id,
+           max(created_at) as last_at,
+           (array_agg(id        order by created_at desc))[1] as last_share_id,
+           (array_agg(snippet   order by created_at desc))[1] as last_snippet,
+           (array_agg(sender_id order by created_at desc))[1] as last_sender_id,
+           sum(is_unread)::int as unread_count
+    from group_rows
+    group by group_id
+  ),
+  unified as (
+    select 'peer'::text as kind, p.id as peer_id, p.username as peer_username, p.avatar_key as peer_avatar_key, p.avatar_url as peer_avatar_url,
+           null::uuid as group_id, null::varchar as group_name, null::varchar as group_color, null::varchar as group_avatar_key, null::text as group_avatar_url,
+           pa.last_share_id, pa.last_snippet, pa.last_sender_id, pa.last_at, pa.unread_count
+    from peer_agg pa
+    join public.profiles p on p.id = pa.peer_id
+    union all
+    select 'group'::text, null::uuid, null::varchar, null::varchar, null::text,
+           g.id, g.name, g.color, g.avatar_key, g.avatar_url,
+           ga.last_share_id, ga.last_snippet, ga.last_sender_id, ga.last_at, ga.unread_count
+    from group_agg ga
+    join public.groups g on g.id = ga.group_id
+  )
+  select * from unified
+  where (after is null or last_at < after)
+  order by last_at desc nulls last
+  limit greatest(1, least(page_size, 50));
+$$;
+
+grant execute on function public.get_conversations(timestamptz, int) to authenticated;
