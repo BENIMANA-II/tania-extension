@@ -163,6 +163,15 @@ const $pickerCircles     = document.getElementById('picker-circles');
 const $pickerCirclesWrap = document.getElementById('picker-circles-wrap');
 const $pickerNote        = document.getElementById('picker-note');
 const $pickerSend        = document.getElementById('picker-send');
+const $pickerSearch      = document.getElementById('picker-search');
+
+// --- DOM: Start-conversation overlay ---
+
+const $startConvBtn      = document.getElementById('start-conv-btn');
+const $startConvPicker   = document.getElementById('start-conv-picker');
+const $startConvClose    = document.getElementById('start-conv-close');
+const $startConvSearch   = document.getElementById('start-conv-search');
+const $startConvFriends  = document.getElementById('start-conv-friends');
 
 // ============================================================
 //  SESSION EXPIRY — auto-logout when JWT expires
@@ -421,6 +430,8 @@ function resetViewState() {
     $savedAddBtn.hidden = true;
     $savedFormError.hidden = true;
   }
+  if ($savedSearch) $savedSearch.value = '';
+  savedCache = [];
 
   // Settings
   $settingsUsernameForm.hidden = true;
@@ -505,6 +516,48 @@ $signupForm.addEventListener('submit', async (e) => {
 });
 
 $settingsLogout.addEventListener('click', logout);
+
+// --- Clear chat history ---
+
+const $settingsClearHistory = document.getElementById('settings-clear-history');
+if ($settingsClearHistory) {
+  $settingsClearHistory.addEventListener('click', async () => {
+    const ok = confirm(
+      'Clear your inbox?\n\n' +
+      'This hides every share that\'s been sent to you from your Chats tab.\n\n' +
+      'Shares you\'ve sent are NOT deleted — the people you sent them to ' +
+      'will still see them, and if any of them replies the conversation ' +
+      'will reappear here.\n\n' +
+      'This can\'t be undone for you.'
+    );
+    if (!ok) return;
+
+    $settingsClearHistory.disabled = true;
+    const prevLabel = $settingsClearHistory.textContent;
+    $settingsClearHistory.textContent = 'Clearing…';
+    try {
+      await api.clearChatHistory();
+      conversationsCache = [];
+      conversationsCursor = null;
+      conversationsAtEnd = false;
+      if ($conversationsList) $conversationsList.innerHTML = '';
+      if (currentThread) {
+        currentThread = null;
+        $viewThread.hidden = true;
+        $viewInbox.hidden = false;
+        closeThreadShareForm();
+      }
+      refreshUnreadCount();
+      if (currentView === 'inbox') loadConversations();
+      showToast('Inbox cleared', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not clear inbox', 'error');
+    } finally {
+      $settingsClearHistory.disabled = false;
+      $settingsClearHistory.textContent = prevLabel;
+    }
+  });
+}
 
 // --- Username editing ---
 
@@ -1461,6 +1514,7 @@ async function openPicker(url) {
   $pickerNote.value = '';
   $pickerSend.disabled = true;
   $pickerCirclesWrap.hidden = true;
+  if ($pickerSearch) $pickerSearch.value = '';
 
   const platform = pendingLink.platform;
   $pickerPreview.innerHTML = `
@@ -1566,6 +1620,102 @@ $pickerFriends.addEventListener('change', (e) => {
   else selectedFriends.delete(cb.value);
   $pickerSend.disabled = !selectedPickerGroupId && selectedFriends.size === 0;
 });
+
+// Filter the picker friend list as the user types.
+if ($pickerSearch) {
+  $pickerSearch.addEventListener('input', () => {
+    const q = $pickerSearch.value.trim().toLowerCase();
+    $pickerFriends.querySelectorAll('.picker__friend').forEach((row) => {
+      const name = (row.querySelector('.picker__name')?.textContent || '').toLowerCase();
+      row.hidden = q !== '' && !name.includes(q);
+    });
+  });
+}
+
+// ============================================================
+//  START CONVERSATION (Inbox FAB → friend list → open thread)
+// ============================================================
+
+let startConvFriendsCache = [];
+
+async function openStartConvPicker() {
+  if (!$startConvPicker) return;
+  $startConvPicker.hidden = false;
+  $startConvSearch.value = '';
+  $startConvFriends.innerHTML =
+    '<div class="feed__loading"><div class="spinner"></div><span>Loading friends...</span></div>';
+
+  try {
+    const { friends } = await api.getFriends();
+    startConvFriendsCache = friends;
+    if (friends.length === 0) {
+      $startConvFriends.innerHTML =
+        '<p class="picker__empty">No friends yet. Add some on the Friends tab!</p>';
+      return;
+    }
+    renderStartConvFriends('');
+    $startConvSearch.focus();
+  } catch (err) {
+    $startConvFriends.innerHTML = `<p class="picker__empty">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function renderStartConvFriends(query) {
+  const q = (query || '').trim().toLowerCase();
+  const matches = q
+    ? startConvFriendsCache.filter((f) => f.user.username.toLowerCase().includes(q))
+    : startConvFriendsCache;
+
+  if (matches.length === 0) {
+    $startConvFriends.innerHTML = `<p class="picker__empty">No friends match "${escapeHtml(q)}"</p>`;
+    return;
+  }
+
+  $startConvFriends.innerHTML = '';
+  matches.forEach((f) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'start-conv__friend';
+    row.dataset.friendId = f.user.id;
+    row.innerHTML = `
+      ${avatarHtml(f.user.username, f.user.avatarKey, 'sm', f.user.avatarUrl)}
+      <span class="picker__name">${escapeHtml(f.user.username)}</span>
+    `;
+    row.addEventListener('click', () => startConversationWith(f.user));
+    $startConvFriends.appendChild(row);
+  });
+}
+
+function closeStartConvPicker() {
+  if (!$startConvPicker) return;
+  $startConvPicker.hidden = true;
+  startConvFriendsCache = [];
+}
+
+function startConversationWith(user) {
+  closeStartConvPicker();
+  openConversation({
+    kind:         'peer',
+    peer:         { id: user.id, username: user.username, avatarKey: user.avatarKey, avatarUrl: user.avatarUrl },
+    group:        null,
+    lastShareId:  null,
+    lastSnippet:  '',
+    lastSenderId: null,
+    lastAt:       null,
+    unreadCount:  0,
+  });
+}
+
+if ($startConvBtn)   $startConvBtn.addEventListener('click', openStartConvPicker);
+if ($startConvClose) $startConvClose.addEventListener('click', closeStartConvPicker);
+if ($startConvPicker) {
+  $startConvPicker.addEventListener('click', (e) => {
+    if (e.target === $startConvPicker) closeStartConvPicker();
+  });
+}
+if ($startConvSearch) {
+  $startConvSearch.addEventListener('input', () => renderStartConvFriends($startConvSearch.value));
+}
 
 $pickerSend.addEventListener('click', async () => {
   if (!pendingLink) return;
@@ -2047,6 +2197,7 @@ $groupEditorDelete.addEventListener('click', async () => {
 const $savedLoading  = document.getElementById('saved-loading');
 const $savedList     = document.getElementById('saved-list');
 const $savedLoadMore = document.getElementById('saved-load-more');
+const $savedSearch    = document.getElementById('saved-search');
 const $savedForm      = document.getElementById('saved-form');
 const $savedUrlInput  = document.getElementById('saved-url-input');
 const $savedNoteInput = document.getElementById('saved-note-input');
@@ -2055,31 +2206,21 @@ const $savedFormError = document.getElementById('saved-form-error');
 
 let savedCursor = null;
 let isSavedLoadingMore = false;
+let savedCache = [];
 
 async function loadBookmarks(append = false) {
   if (!append) {
     $savedLoading.hidden = false;
     $savedList.innerHTML = '';
     savedCursor = null;
+    savedCache = [];
   }
 
   try {
     const { bookmarks, nextCursor } = await api.listBookmarks(append ? savedCursor : undefined);
     savedCursor = nextCursor;
-
-    if (!append && bookmarks.length === 0) {
-      $savedList.innerHTML = `
-        <li class="feed__empty-state">
-          <svg class="feed__empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/>
-          </svg>
-          <p class="feed__empty-title">Nothing saved yet</p>
-          <p class="feed__empty-text">Save links from your inbox, or paste one above</p>
-        </li>`;
-    } else {
-      bookmarks.forEach(renderBookmarkItem);
-    }
-
+    savedCache.push(...bookmarks);
+    renderSavedList();
     $savedLoadMore.hidden = !nextCursor;
   } catch (err) {
     if (!append) {
@@ -2099,6 +2240,41 @@ async function loadBookmarks(append = false) {
   }
 }
 
+function bookmarkMatchesQuery(b, q) {
+  if (!q) return true;
+  const fields = [b.note, b.url, b.title, b.ogTitle, b.ogDescription];
+  return fields.some((f) => typeof f === 'string' && f.toLowerCase().includes(q));
+}
+
+function renderSavedList() {
+  const q = ($savedSearch?.value || '').trim().toLowerCase();
+  $savedList.innerHTML = '';
+
+  if (savedCache.length === 0) {
+    $savedList.innerHTML = `
+      <li class="feed__empty-state">
+        <svg class="feed__empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/>
+        </svg>
+        <p class="feed__empty-title">Nothing saved yet</p>
+        <p class="feed__empty-text">Save links from your inbox, or paste one above</p>
+      </li>`;
+    return;
+  }
+
+  const matches = q ? savedCache.filter((b) => bookmarkMatchesQuery(b, q)) : savedCache;
+  if (matches.length === 0) {
+    const moreHint = savedCursor ? ' Try Load more to search older links.' : '';
+    $savedList.innerHTML = `
+      <li class="feed__empty-state">
+        <p class="feed__empty-title">No matches</p>
+        <p class="feed__empty-text">Nothing matched "${escapeHtml(q)}".${moreHint}</p>
+      </li>`;
+    return;
+  }
+  matches.forEach(renderBookmarkItem);
+}
+
 function renderBookmarkItem(b) {
   const preview = buildLinkPreview(b.url);
   const li = document.createElement('li');
@@ -2109,6 +2285,12 @@ function renderBookmarkItem(b) {
   const displayUrl = truncateUrl(b.url, 55);
   const time = timeAgo(b.savedAt);
 
+  const mediaHtml = b.ogImage
+    ? `<a class="preview-card__media" href="${escapeAttr(b.url)}" target="_blank" rel="noopener">
+         <img class="preview-card__image" src="${escapeAttr(b.ogImage)}" alt="" loading="lazy" referrerpolicy="no-referrer">
+       </a>`
+    : '';
+
   li.innerHTML = `
     <div class="preview-card__header">
       ${buildPlatformBadge(preview)}
@@ -2118,13 +2300,21 @@ function renderBookmarkItem(b) {
         </button>
       </div>
     </div>
+    ${mediaHtml}
     ${displayTitle ? `<p class="preview-card__title">${escapeHtml(displayTitle)}</p>` : ''}
+    ${b.ogDescription ? `<p class="preview-card__og-desc">${escapeHtml(b.ogDescription)}</p>` : ''}
     ${b.note ? `<p class="preview-card__note">${escapeHtml(b.note)}</p>` : ''}
     <a class="preview-card__url-link" href="${escapeAttr(b.url)}" target="_blank" rel="noopener">${escapeHtml(displayUrl)}</a>
     <div class="preview-card__footer">
       <span class="preview-card__time">Saved ${time}</span>
     </div>
   `;
+  const img = li.querySelector('.preview-card__image');
+  if (img) {
+    img.addEventListener('error', () => {
+      img.closest('.preview-card__media')?.remove();
+    });
+  }
   $savedList.appendChild(li);
 }
 
@@ -2137,12 +2327,14 @@ $savedList.addEventListener('click', async (e) => {
   const card = delBtn.closest('.preview-card');
   try {
     await api.deleteBookmark(id);
+    savedCache = savedCache.filter((b) => b.id !== id);
     card.style.transition = 'opacity 0.2s, transform 0.2s';
     card.style.opacity = '0';
     card.style.transform = 'translateX(20px)';
     setTimeout(() => {
       card.remove();
-      if ($savedList.children.length === 0) loadBookmarks();
+      if (savedCache.length === 0) loadBookmarks();
+      else if ($savedList.children.length === 0) renderSavedList();
     }, 200);
     showToast('Removed', 'success');
   } catch (err) {
@@ -2157,6 +2349,10 @@ $savedLoadMore.addEventListener('click', () => {
   $savedLoadMore.textContent = 'Loading...';
   loadBookmarks(true);
 });
+
+if ($savedSearch) {
+  $savedSearch.addEventListener('input', renderSavedList);
+}
 
 // ============================================================
 //  SAVED FORM (progressive: paste URL → reveal note + save)

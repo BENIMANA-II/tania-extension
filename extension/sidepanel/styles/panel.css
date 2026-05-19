@@ -63,6 +63,7 @@
     --shadow-sm: 0 1px 2px rgba(0,0,0,0.2);
     --shadow-md: 0 2px 8px rgba(0,0,0,0.3);
     --shadow-lg: 0 8px 24px rgba(0,0,0,0.4);
+    --nav-height: 56px;
 }
 
 /* ====== Reset & Base ====== */
@@ -482,7 +483,9 @@ body {
 /* ====== Header ====== */
 
 .header {
-  position: relative;
+  position: sticky;
+  top: 0;
+  z-index: 40;
   padding: 14px 16px 10px;
   border-bottom: 1px solid var(--color-border-light);
   background: var(--color-surface);
@@ -1384,6 +1387,25 @@ body {
   margin-top: 20px;
 }
 
+.settings-clear-row {
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.settings-clear-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-clear-row__hint {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  line-height: 1.35;
+}
+
 /* Theme toggle */
 
 .theme-toggle {
@@ -1549,6 +1571,94 @@ body {
 }
 
 .picker__footer .input { flex: 1; }
+
+/* Picker — friend search bar (share overlay + start-conversation overlay) */
+
+.picker__search-wrap {
+  position: relative;
+  padding: 4px 16px 8px;
+}
+
+.picker__search {
+  padding-left: 32px;
+  font-size: 13px;
+}
+
+.picker__search-icon {
+  position: absolute;
+  left: 26px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
+
+/* Inbox — floating "Start chat" button, bottom-left above the nav */
+
+.start-conv-btn {
+  position: fixed;
+  left: 14px;
+  bottom: calc(var(--nav-height) + 12px);
+  z-index: 45;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px 8px 12px;
+  border: none;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: #fff;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition: transform 0.15s var(--ease), box-shadow 0.15s var(--ease), background 0.15s var(--ease);
+}
+
+.start-conv-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-lg);
+}
+
+.start-conv-btn:active {
+  transform: translateY(0);
+}
+
+.start-conv-btn svg {
+  flex-shrink: 0;
+}
+
+/* Hidden-by-filter friend row inside any picker list */
+.picker__friend[hidden],
+.start-conv__friend[hidden] { display: none !important; }
+
+/* Start-conversation friend row (single-select, no checkbox) */
+
+.start-conv__friend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+  font-family: var(--font);
+  color: var(--color-text);
+}
+
+.start-conv__friend:hover {
+  background: var(--color-bg);
+}
+
+.start-conv__friend .picker__name {
+  flex: 1;
+  min-width: 0;
+}
 
 /* ====== Toast ====== */
 
@@ -1723,27 +1833,56 @@ body {
 
 .preview-card__url-link:hover { text-decoration: underline; }
 
-/* Saved view — "save a link" form, pinned to the bottom like the chat composer */
+/* OG-image banner — sits above the title in Saved cards (and any other
+   preview-card that opts in by including <a class="preview-card__media">). */
+
+.preview-card__media {
+  display: block;
+  margin: 8px 0 4px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border-light);
+  aspect-ratio: 16 / 9;
+  text-decoration: none;
+}
+
+.preview-card__image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.25s var(--ease);
+}
+
+.preview-card__media:hover .preview-card__image {
+  transform: scale(1.02);
+}
+
+/* Saved view — "save a link" form, fixed above the bottom nav so it stays
+   visible while the list scrolls behind it. Padding on #view-saved keeps the
+   last list item from being hidden under the fixed form. */
+
+#view-saved {
+  padding-bottom: calc(var(--nav-height) + 100px);
+}
 
 .saved-feed {
-  flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  overflow-y: auto;
 }
 
 .saved-form-section {
-  margin-top: auto;
-  margin-bottom: 10px;
-  flex-shrink: 0;
+  position: fixed;
+  left: 8px;
+  right: 8px;
+  bottom: calc(var(--nav-height) + 6px);
+  z-index: 45;
   padding: 10px 12px 12px;
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
   box-shadow: var(--shadow-md);
-  margin-left: 8px;
-  margin-right: 8px;
 }
 
 .saved-form {

@@ -568,6 +568,25 @@ export const api = {
     return { unread: unread || 0 };
   },
 
+  // Clears the current user's *incoming* messages only.
+  //
+  // Drops every share_recipients row where the user is the recipient — those
+  // shares disappear from their inbox. Sent shares are left alone, so the
+  // people the user has shared with still see them, and a reply from any of
+  // those recipients will surface the conversation again.
+  //
+  // RLS (`share_recipients_delete_participant`) gates the delete to the
+  // user's own recipient rows.
+  async clearChatHistory() {
+    const { user } = await getAuth();
+    if (!user) throw new Error('Not signed in');
+    await request(
+      `/rest/v1/share_recipients?recipient_id=eq.${user.id}`,
+      { method: 'DELETE' }
+    );
+    return { message: 'Inbox cleared' };
+  },
+
   // ---- Bookmarks (personal archive) ----
 
   async saveBookmark(url, { title, note, platform, overwrite } = {}) {
