@@ -1434,3 +1434,96 @@ as $$
 $$;
 
 grant execute on function public.get_conversations(timestamptz, int) to authenticated;
+
+-- ===========================================================================
+-- PATCH: fix get_conversation_thread — outgoing peer shares were filtered out
+-- ===========================================================================
+-- The earlier definitions of this function used a LEFT JOIN restricted to
+-- `sr.recipient_id = auth.uid()`, then required `sr.recipient_id = p_peer_id`
+-- for outgoing shares. That branch can never match (you're not the recipient
+-- of your own send), so messages you sent to a peer disappeared from the
+-- thread. Replaced with EXISTS subqueries that check the correct recipient
+-- side for each direction.
+
+drop function if exists public.get_conversation_thread(uuid, uuid, int);
+
+create or replace function public.get_conversation_thread(
+  p_peer_id  uuid default null,
+  p_group_id uuid default null,
+  page_size  int  default 50
+)
+returns table (
+  id             uuid,
+  url            text,
+  title          varchar,
+  note           varchar,
+  platform       varchar,
+  og_title       varchar,
+  og_description varchar,
+  og_image       text,
+  sender_id      uuid,
+  sender_username   varchar,
+  sender_avatar_key varchar,
+  sender_avatar_url text,
+  direction      text,
+  read           boolean,
+  shared_at      timestamptz,
+  replies        json
+)
+language sql security invoker set search_path = public stable
+as $$
+  with picked as (
+    select s.*
+    from public.shares s
+    where (
+      (p_peer_id is not null and s.group_id is null
+        and (
+          (s.sender_id = auth.uid()
+            and exists (
+              select 1 from public.share_recipients sr
+              where sr.share_id = s.id and sr.recipient_id = p_peer_id))
+          or
+          (s.sender_id = p_peer_id
+            and exists (
+              select 1 from public.share_recipients sr
+              where sr.share_id = s.id and sr.recipient_id = auth.uid()))
+        ))
+      or
+      (p_group_id is not null and s.group_id = p_group_id
+        and public.is_group_member(p_group_id))
+    )
+    order by s.created_at desc
+    limit greatest(1, least(page_size, 200))
+  )
+  select
+    p.id, p.url, p.title, p.note, p.platform,
+    p.og_title, p.og_description, p.og_image,
+    p.sender_id,
+    sender.username   as sender_username,
+    sender.avatar_key as sender_avatar_key,
+    sender.avatar_url as sender_avatar_url,
+    case when p.sender_id = auth.uid() then 'out' else 'in' end as direction,
+    coalesce(sr2.read, p.sender_id = auth.uid()) as read,
+    p.created_at as shared_at,
+    coalesce(
+      (select json_agg(json_build_object(
+                'id', r.id,
+                'author_id', r.author_id,
+                'author', a.username,
+                'avatar_key', a.avatar_key,
+                'avatar_url', a.avatar_url,
+                'body', r.body,
+                'created_at', r.created_at
+              ) order by r.created_at asc)
+         from public.share_replies r
+         join public.profiles a on a.id = r.author_id
+        where r.share_id = p.id),
+      '[]'::json
+    ) as replies
+  from picked p
+  join public.profiles sender on sender.id = p.sender_id
+  left join public.share_recipients sr2 on sr2.share_id = p.id and sr2.recipient_id = auth.uid()
+  order by p.created_at asc;
+$$;
+
+grant execute on function public.get_conversation_thread(uuid, uuid, int) to authenticated;

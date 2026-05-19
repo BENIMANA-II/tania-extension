@@ -2487,7 +2487,6 @@ body {
   max-width: 84%;
   background: var(--color-surface);
   border: 1px solid var(--color-border-light);
-  border-left: 3px solid var(--bubble-color, var(--color-text-muted));
   border-radius: var(--radius-sm);
   border-top-left-radius: 4px;
   padding: 8px 10px;
@@ -2514,15 +2513,6 @@ body {
   white-space: nowrap;
 }
 
-.thread-msg__reply-count {
-  font-size: 10.5px;
-  color: var(--color-text-muted);
-  background: var(--color-border-light);
-  padding: 1px 6px;
-  border-radius: 999px;
-  flex-shrink: 0;
-}
-
 /* Expanded section — hidden until the card is clicked */
 .thread-msg__expanded { display: none; }
 .thread-msg--expanded .thread-msg__expanded {
@@ -2533,19 +2523,64 @@ body {
 }
 
 .thread-msg--expanded .thread-msg__card { cursor: default; }
-.thread-msg--out.thread-msg--expanded .thread-msg__expanded { border-top-color: rgba(255, 255, 255, 0.25); }
-.thread-msg--out .thread-msg__reply-count {
-  background: rgba(255, 255, 255, 0.2);
-  color: rgba(255, 255, 255, 0.9);
+
+/* Inline replies — visible without expanding. Each reply renders as a
+   compact note-style row attached to the card, prefixed with the author. */
+.thread-msg__inline-replies {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--color-border);
+}
+.thread-msg__inline-replies:empty { display: none; }
+
+.thread-msg__inline-reply {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
 }
 
-/* Outgoing: solid accent bubble with white text — "your color" */
-.thread-msg--out .thread-msg__card {
-  background: var(--color-accent);
+.thread-msg__inline-reply-author {
+  font-weight: 600;
+  color: var(--color-text);
+  flex-shrink: 0;
+}
+.thread-msg__inline-reply-author::after { content: ':'; }
+
+.thread-msg__inline-reply-body {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.thread-msg__inline-reply-delete {
   border: none;
-  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: var(--radius-xs);
+  opacity: 0;
+  transition: opacity 0.15s var(--ease), color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.thread-msg__inline-reply:hover .thread-msg__inline-reply-delete { opacity: 1; }
+.thread-msg__inline-reply-delete:hover {
+  color: var(--color-error);
+  background: var(--color-error-soft);
+}
+
+/* Outgoing keeps the same colors as incoming — direction is conveyed by the
+   avatar position only (row-reverse swaps the avatar to the right). */
+.thread-msg--out .thread-msg__card {
+  border-top-left-radius: var(--radius-sm);
   border-top-right-radius: 4px;
-  color: #fff;
 }
 
 .thread-msg__head {
@@ -2556,28 +2591,15 @@ body {
   margin-bottom: 4px;
 }
 
-/* Incoming: sender name picks up their identity color */
 .thread-msg__sender {
   font-size: 11.5px;
   font-weight: 600;
-  color: var(--bubble-color, var(--color-text));
+  color: var(--color-text);
 }
 
 .thread-msg__time { font-size: 10.5px; color: var(--color-text-muted); }
 
-/* Outgoing flips text + secondary text to legible-on-accent */
-.thread-msg--out .thread-msg__sender,
-.thread-msg--out .thread-msg__title,
-.thread-msg--out .thread-msg__note {
-  color: #fff;
-}
-.thread-msg--out .thread-msg__time { color: rgba(255, 255, 255, 0.75); }
-
 .thread-msg__preview .preview-card__badge { margin-bottom: 4px; }
-.thread-msg--out .thread-msg__preview .preview-card__badge {
-  background: rgba(255, 255, 255, 0.18);
-  color: #fff;
-}
 
 .thread-msg__title { font-size: 13px; font-weight: 600; margin: 2px 0; line-height: 1.3; }
 .thread-msg__note { font-size: 12.5px; color: var(--color-text-secondary); margin: 2px 0; }
@@ -2589,20 +2611,7 @@ body {
   text-decoration: none;
   word-break: break-all;
 }
-.thread-msg--out .thread-msg__url { color: rgba(255, 255, 255, 0.95); text-decoration: underline; }
 .thread-msg__url:hover { text-decoration: underline; }
-
-/* Outgoing action buttons need to read on accent background */
-.thread-msg--out .thread-msg__action-btn {
-  background: rgba(255, 255, 255, 0.15);
-  border-color: rgba(255, 255, 255, 0.25);
-  color: #fff;
-}
-.thread-msg--out .thread-msg__action-btn:hover {
-  background: rgba(255, 255, 255, 0.25);
-  border-color: rgba(255, 255, 255, 0.5);
-  color: #fff;
-}
 
 /* Footer row inside expanded message: Reply input on the left, Save on the right. */
 .thread-msg__footer {
@@ -2615,12 +2624,21 @@ body {
 .thread-msg__footer .thread-msg__reply-form {
   flex: 1;
   margin-top: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "body send"
+    "note note";
+  gap: 6px;
+  align-items: center;
 }
 
-.thread-msg__footer .thread-msg__reply-input {
-  width: 100%;
-}
+.thread-msg__footer .thread-msg__reply-body { grid-area: body; width: 100%; }
+.thread-msg__footer .thread-msg__reply-note { grid-area: note; width: 100%; }
+.thread-msg__footer .thread-msg__reply-btn  { grid-area: send; }
+
+.thread-msg__reply-body,
+.thread-msg__reply-note { font-size: 12px; padding: 6px 10px; }
 
 .thread-msg__action-btn {
   display: inline-flex;
@@ -2640,52 +2658,81 @@ body {
 .thread-msg__action-btn:hover { border-color: var(--color-accent); color: var(--color-accent); }
 .thread-msg__action-btn:disabled { opacity: 0.5; cursor: wait; }
 
-.thread-msg__replies {
-  margin-left: 32px;
+.thread-msg__reply-form {
   margin-top: 4px;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.thread-msg--out .thread-msg__replies { margin-left: 0; margin-right: 32px; }
-
-.thread-reply {
-  display: flex;
   gap: 6px;
-  align-items: flex-start;
-  padding: 4px 0;
 }
 
-.thread-reply--mine { flex-direction: row-reverse; }
+/* Standalone reply bubble — text replies also appear as their own messages
+   in the conversation flow (in addition to the inline note under the parent
+   share card). Direction comes from the avatar position only — no colors. */
 
-.thread-reply__bubble {
+.thread-reply-msg {
+  margin: 6px 0;
+  animation: fadeIn 0.2s var(--ease);
+}
+
+.thread-reply-msg__row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.thread-reply-msg--out .thread-reply-msg__row { flex-direction: row-reverse; }
+
+.thread-reply-msg__bubble {
+  position: relative;
   flex: 1;
   min-width: 0;
-  max-width: 80%;
+  max-width: 72%;
   background: var(--color-surface);
   border: 1px solid var(--color-border-light);
-  border-left: 2px solid var(--bubble-color, var(--color-text-muted));
-  border-radius: var(--radius-xs);
-  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
 }
 
-.thread-reply--mine .thread-reply__bubble {
-  background: var(--color-accent);
-  border: none;
-  color: #fff;
+.thread-reply-msg--out .thread-reply-msg__bubble { border-top-right-radius: 4px; }
+.thread-reply-msg--in  .thread-reply-msg__bubble { border-top-left-radius:  4px; }
+
+.thread-reply-msg__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 2px;
 }
 
-.thread-reply__head { display: flex; gap: 6px; align-items: baseline; }
-.thread-reply__author { font-size: 11px; font-weight: 600; color: var(--bubble-color, var(--color-text)); }
-.thread-reply__time { font-size: 10px; color: var(--color-text-muted); }
-.thread-reply__body { font-size: 12.5px; color: var(--color-text); margin: 1px 0 0; word-break: break-word; white-space: pre-wrap; }
+.thread-reply-msg__author { font-size: 11.5px; font-weight: 600; color: var(--color-text); }
+.thread-reply-msg__time   { font-size: 10.5px; color: var(--color-text-muted); }
 
-.thread-reply--mine .thread-reply__author,
-.thread-reply--mine .thread-reply__body { color: #fff; }
-.thread-reply--mine .thread-reply__time { color: rgba(255, 255, 255, 0.75); }
+.thread-reply-msg__ref {
+  display: inline-block;
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  text-decoration: none;
+  border-left: 2px solid var(--color-border);
+  padding: 1px 6px;
+  margin-bottom: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread-reply-msg__ref:hover { color: var(--color-accent); border-left-color: var(--color-accent); }
 
-.thread-reply__delete {
+.thread-reply-msg__body {
+  font-size: 12.5px;
+  color: var(--color-text);
+  margin: 0;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.thread-reply-msg__delete {
+  position: absolute;
+  top: 4px;
+  right: 4px;
   width: 18px;
   height: 18px;
   padding: 0;
@@ -2695,17 +2742,24 @@ body {
   border-radius: var(--radius-xs);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.15s var(--ease);
+  transition: opacity 0.15s var(--ease), color 0.15s var(--ease), background 0.15s var(--ease);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
-.thread-reply:hover .thread-reply__delete { opacity: 1; }
-.thread-reply__delete:hover { color: var(--color-error); background: var(--color-error-soft); }
+.thread-reply-msg--out .thread-reply-msg__delete { right: auto; left: 4px; }
+.thread-reply-msg__bubble:hover .thread-reply-msg__delete { opacity: 1; }
+.thread-reply-msg__delete:hover { color: var(--color-error); background: var(--color-error-soft); }
 
-.thread-msg__reply-form {
-  margin-top: 4px;
-  display: flex;
-  gap: 6px;
+/* Brief flash when scrolling to a parent share via the ↪ reference link. */
+.thread-msg--flash .thread-msg__card {
+  animation: msgFlash 1.4s var(--ease);
 }
-.thread-msg__reply-input { font-size: 12px; padding: 6px 10px; }
+@keyframes msgFlash {
+  0%   { box-shadow: 0 0 0 0 var(--color-accent-soft); }
+  20%  { box-shadow: 0 0 0 4px var(--color-accent-soft); }
+  100% { box-shadow: 0 0 0 0 var(--color-accent-soft); }
+}
 
 /* Composer pinned to the bottom of the thread view, just above the nav.
    `margin-top: auto` makes it stick to the bottom even when the message

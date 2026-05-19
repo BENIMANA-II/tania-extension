@@ -59,7 +59,7 @@ applyCompact();
 
 import { api, getAuth, setAuth, clearAuth } from '../shared/api.js';
 import { extractUrl, isValidUrl, buildLinkPreview } from './lib/link-utils.js';
-import { AVATAR_PRESETS, avatarHtml, colorForUser } from './lib/avatars.js';
+import { AVATAR_PRESETS, avatarHtml } from './lib/avatars.js';
 
 // --- State ---
 
@@ -910,8 +910,25 @@ function renderThreadMessages(messages) {
     $threadMessages.innerHTML = `<div class="thread-empty"><p>No messages yet — share a link below.</p></div>`;
     return;
   }
+
+  // Build a unified chronological event stream: each share is one event, and
+  // each text reply attached to a share is its own event. Replies still show
+  // inline under the parent share card for at-a-glance context, AND appear as
+  // standalone bubbles in the conversation flow at their actual reply time.
+  const events = [];
+  for (const m of messages) {
+    events.push({ type: 'share', at: m.sharedAt, share: m });
+    for (const r of (m.replies || [])) {
+      events.push({ type: 'reply', at: r.createdAt, reply: r, parentShare: m });
+    }
+  }
+  events.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+
   $threadMessages.innerHTML = '';
-  messages.forEach((m) => $threadMessages.appendChild(renderThreadMessage(m)));
+  for (const e of events) {
+    if (e.type === 'share') $threadMessages.appendChild(renderThreadMessage(e.share));
+    else                    $threadMessages.appendChild(renderThreadReplyMessage(e.reply, e.parentShare));
+  }
   requestAnimationFrame(() => { $threadMessages.scrollTop = $threadMessages.scrollHeight; });
 }
 
@@ -919,15 +936,12 @@ function renderThreadMessage(m) {
   const wrapper = document.createElement('div');
   wrapper.className = `thread-msg thread-msg--${m.direction}`;
   wrapper.dataset.shareId = m.id;
-  wrapper.style.setProperty('--bubble-color', colorForUser(m.sender.username, m.sender.avatarKey));
   const preview = buildLinkPreview(m.url);
   const displayUrl = truncateUrl(m.url, 50);
   const displayTitle = m.ogTitle || m.title || displayUrl;
   const time = timeAgo(m.sharedAt);
   const senderAvatar = avatarHtml(m.sender.username, m.sender.avatarKey, 'sm', m.sender.avatarUrl);
-  const replyCount = (m.replies || []).length;
-
-  const repliesHtml = (m.replies || []).map((r) => renderReplyHtml(r)).join('');
+  const repliesHtml = (m.replies || []).map((r) => renderInlineReply(r)).join('');
 
   wrapper.innerHTML = `
     <div class="thread-msg__row">
@@ -940,17 +954,16 @@ function renderThreadMessage(m) {
         <div class="thread-msg__compact">
           ${buildPlatformBadge(preview)}
           <p class="thread-msg__title" title="${escapeAttr(displayTitle)}">${escapeHtml(displayTitle)}</p>
-          ${replyCount > 0 ? `<span class="thread-msg__reply-count">💬 ${replyCount}</span>` : ''}
         </div>
+        <div class="thread-msg__inline-replies" data-share-id="${escapeAttr(m.id)}">${repliesHtml}</div>
         <div class="thread-msg__expanded">
           ${m.note ? `<p class="thread-msg__note">${escapeHtml(m.note)}</p>` : ''}
           <a class="thread-msg__url" href="${escapeAttr(m.url)}" target="_blank" rel="noopener">${escapeHtml(displayUrl)}</a>
-          <div class="thread-msg__replies" data-share-id="${escapeAttr(m.id)}">
-            ${repliesHtml}
-          </div>
           <div class="thread-msg__footer">
             <form class="thread-msg__reply-form" data-share-id="${escapeAttr(m.id)}">
-              <input class="input thread-msg__reply-input" type="text" placeholder="Reply..." maxlength="1000" required>
+              <input class="input thread-msg__reply-body" type="text" placeholder="Reply with text or a link..." maxlength="1000" autocomplete="off">
+              <input class="input thread-msg__reply-note" type="text" placeholder="Add a note (optional)" maxlength="500" hidden>
+              <button type="submit" class="btn btn--primary btn--sm thread-msg__reply-btn" hidden>Send</button>
             </form>
             <button class="thread-msg__action-btn" data-archive="${escapeAttr(m.id)}" title="Save to archive">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
@@ -964,24 +977,45 @@ function renderThreadMessage(m) {
   return wrapper;
 }
 
-function renderReplyHtml(r) {
+function renderInlineReply(r) {
   const isMine = currentUser && r.authorId === currentUser.id;
-  const color = colorForUser(r.author, r.avatarKey);
   return `
-    <div class="thread-reply${isMine ? ' thread-reply--mine' : ''}" data-reply-id="${escapeAttr(r.id)}" style="--bubble-color:${color}">
-      ${avatarHtml(r.author, r.avatarKey, 'sm', r.avatarUrl)}
-      <div class="thread-reply__bubble">
-        <div class="thread-reply__head">
-          <span class="thread-reply__author">${escapeHtml(r.author)}</span>
-          <span class="thread-reply__time">${timeAgo(r.createdAt)}</span>
-        </div>
-        <p class="thread-reply__body">${escapeHtml(r.body)}</p>
-      </div>
-      ${isMine ? `<button class="thread-reply__delete" data-reply-delete="${escapeAttr(r.id)}" title="Delete">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>` : ''}
+    <div class="thread-msg__inline-reply${isMine ? ' thread-msg__inline-reply--mine' : ''}" data-reply-id="${escapeAttr(r.id)}">
+      <span class="thread-msg__inline-reply-author">${escapeHtml(r.author)}</span>
+      <span class="thread-msg__inline-reply-body">${escapeHtml(r.body)}</span>
+      ${isMine ? `<button class="thread-msg__inline-reply-delete" data-reply-delete="${escapeAttr(r.id)}" title="Delete">&times;</button>` : ''}
     </div>
   `;
+}
+
+function renderThreadReplyMessage(r, parentShare) {
+  const isMine = currentUser && r.authorId === currentUser.id;
+  const wrapper = document.createElement('div');
+  wrapper.className = `thread-reply-msg thread-reply-msg--${isMine ? 'out' : 'in'}`;
+  wrapper.dataset.replyId = r.id;
+  const authorAvatar = avatarHtml(r.author, r.avatarKey, 'sm', r.avatarUrl);
+  const time = timeAgo(r.createdAt);
+  const parentTitle = parentShare
+    ? (parentShare.ogTitle || parentShare.title || truncateUrl(parentShare.url, 40))
+    : null;
+
+  wrapper.innerHTML = `
+    <div class="thread-reply-msg__row">
+      ${authorAvatar}
+      <div class="thread-reply-msg__bubble">
+        <div class="thread-reply-msg__head">
+          <span class="thread-reply-msg__author">${escapeHtml(r.author)}</span>
+          <span class="thread-reply-msg__time">${time}</span>
+        </div>
+        ${parentTitle ? `<a class="thread-reply-msg__ref" href="#share-${escapeAttr(parentShare.id)}" data-jump-share="${escapeAttr(parentShare.id)}">↪ ${escapeHtml(parentTitle)}</a>` : ''}
+        <p class="thread-reply-msg__body">${escapeHtml(r.body)}</p>
+        ${isMine ? `<button class="thread-reply-msg__delete" data-reply-delete="${escapeAttr(r.id)}" title="Delete">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>` : ''}
+      </div>
+    </div>
+  `;
+  return wrapper;
 }
 
 $threadMessages.addEventListener('click', async (e) => {
@@ -1003,51 +1037,109 @@ $threadMessages.addEventListener('click', async (e) => {
   }
   const delBtn = e.target.closest('[data-reply-delete]');
   if (delBtn) {
+    e.preventDefault();
     e.stopPropagation();
     const id = delBtn.dataset.replyDelete;
     try {
       await api.deleteReply(id);
-      delBtn.closest('.thread-reply')?.remove();
+      // Remove every copy of this reply — inline note under the parent
+      // share AND the standalone bubble in the conversation flow.
+      $threadMessages.querySelectorAll(`[data-reply-id="${id}"]`).forEach((el) => el.remove());
     } catch (err) {
       showToast(err.message, 'error');
     }
     return;
   }
 
-  // Don't toggle when interacting with form/link inside the card.
-  if (e.target.closest('.thread-msg__url, .thread-msg__reply-form, .thread-reply__bubble')) return;
+  const jumpRef = e.target.closest('[data-jump-share]');
+  if (jumpRef) {
+    e.preventDefault();
+    const target = $threadMessages.querySelector(`.thread-msg[data-share-id="${jumpRef.dataset.jumpShare}"]`);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.add('thread-msg--flash');
+      setTimeout(() => target.classList.remove('thread-msg--flash'), 1500);
+    }
+    return;
+  }
+
+  // Don't toggle when interacting with the link, the reply composer, an
+  // inline reply row, or a standalone reply bubble.
+  if (e.target.closest('.thread-msg__url, .thread-msg__reply-form, .thread-msg__inline-reply, .thread-reply-msg')) return;
 
   const card = e.target.closest('.thread-msg');
   if (card) {
     card.classList.toggle('thread-msg--expanded');
-    // Auto-focus the reply input on expand for quick replying.
     if (card.classList.contains('thread-msg--expanded')) {
-      const input = card.querySelector('.thread-msg__reply-input');
+      const input = card.querySelector('.thread-msg__reply-body');
       if (input) setTimeout(() => input.focus(), 50);
     }
   }
+});
+
+// Progressive reveal inside a reply form. Send shows as soon as there's
+// content; the optional note field only shows when the input parses as a
+// URL (i.e. the reply is about to become a link-share card).
+$threadMessages.addEventListener('input', (e) => {
+  const bodyInput = e.target.closest('.thread-msg__reply-body');
+  if (!bodyInput) return;
+  const form = bodyInput.closest('.thread-msg__reply-form');
+  const noteInput = form.querySelector('.thread-msg__reply-note');
+  const sendBtn   = form.querySelector('.thread-msg__reply-btn');
+  const text = bodyInput.value.trim();
+  sendBtn.hidden = text.length === 0;
+  noteInput.hidden = !isValidUrl(text);
 });
 
 $threadMessages.addEventListener('submit', async (e) => {
   const form = e.target.closest('.thread-msg__reply-form');
   if (!form) return;
   e.preventDefault();
-  const shareId = form.dataset.shareId;
-  const input = form.querySelector('.thread-msg__reply-input');
-  const body = input.value.trim();
-  if (!body) return;
-  input.disabled = true;
+  if (!currentThread) return;
+
+  const bodyInput = form.querySelector('.thread-msg__reply-body');
+  const noteInput = form.querySelector('.thread-msg__reply-note');
+  const sendBtn   = form.querySelector('.thread-msg__reply-btn');
+  const text = bodyInput.value.trim();
+  if (!text) return;
+
+  sendBtn.disabled = true;
   try {
-    const { reply } = await api.postReply(shareId, body);
-    const card = form.closest('.thread-msg');
-    const repliesEl = card?.querySelector(`.thread-msg__replies[data-share-id="${shareId}"]`);
-    if (repliesEl) repliesEl.insertAdjacentHTML('beforeend', renderReplyHtml(reply));
-    input.value = '';
+    if (isValidUrl(text)) {
+      // URL → send a new share into the conversation; renders as a card on reload.
+      const preview = buildLinkPreview(text);
+      await api.share(
+        text,
+        currentThread.kind === 'peer' ? [currentThread.peer.id] : null,
+        {
+          note:     noteInput.value.trim() || undefined,
+          platform: preview.platform?.id || undefined,
+          title:    preview.sublabel || undefined,
+          groupId:  currentThread.kind === 'group' ? currentThread.group.id : undefined,
+        }
+      );
+      bodyInput.value = '';
+      noteInput.value = '';
+      noteInput.hidden = true;
+      sendBtn.hidden = true;
+      showToast('Shared', 'success');
+      openConversation(currentThread); // reload to surface the new card
+    } else {
+      // Plain text → posted as a reply attached to the parent share. Reload
+      // the conversation so the reply appears both as an inline note under
+      // the parent card AND as its own bubble in the chronological flow.
+      const parentShareId = form.dataset.shareId;
+      await api.postReply(parentShareId, text);
+      bodyInput.value = '';
+      noteInput.value = '';
+      noteInput.hidden = true;
+      sendBtn.hidden = true;
+      openConversation(currentThread);
+    }
   } catch (err) {
     showToast(err.message, 'error');
   } finally {
-    input.disabled = false;
-    input.focus();
+    sendBtn.disabled = false;
   }
 });
 
