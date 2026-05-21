@@ -477,13 +477,16 @@ export const api = {
       read:          r.read,
       sharedAt:      r.shared_at,
       replies:       (r.replies || []).map((rep) => ({
-        id:        rep.id,
-        authorId:  rep.author_id,
-        author:    rep.author,
-        avatarKey: rep.avatar_key,
-        avatarUrl: rep.avatar_url,
-        body:      rep.body,
-        createdAt: rep.created_at,
+        id:            rep.id,
+        authorId:      rep.author_id,
+        author:        rep.author,
+        avatarKey:     rep.avatar_key,
+        avatarUrl:     rep.avatar_url,
+        body:          rep.body,
+        createdAt:     rep.created_at,
+        parentReplyId: rep.parent_reply_id || null,
+        parentAuthor:  rep.parent_author   || null,
+        parentExcerpt: rep.parent_excerpt  || null,
       })),
     }));
     return { messages };
@@ -637,26 +640,36 @@ export const api = {
     const rows = await rpc('list_share_replies', { p_share_id: shareId });
     return {
       replies: (rows || []).map((r) => ({
-        id:        r.id,
-        authorId:  r.author_id,
-        author:    r.author_username,
-        body:      r.body,
-        createdAt: r.created_at,
+        id:            r.id,
+        authorId:      r.author_id,
+        author:        r.author_username,
+        body:          r.body,
+        createdAt:     r.created_at,
+        parentReplyId: r.parent_reply_id || null,
+        parentAuthor:  r.parent_author   || null,
+        parentExcerpt: r.parent_excerpt  || null,
       })),
     };
   },
 
-  async postReply(shareId, body) {
-    const rows = await rpc('post_share_reply', { p_share_id: shareId, p_body: body });
+  async postReply(shareId, body, parentReplyId) {
+    const rows = await rpc('post_share_reply', {
+      p_share_id:        shareId,
+      p_body:            body,
+      p_parent_reply_id: parentReplyId || null,
+    });
     const r = rows?.[0];
     if (!r) throw new ApiError('Reply failed', 500);
     return {
       reply: {
-        id:        r.id,
-        authorId:  r.author_id,
-        author:    r.author_username,
-        body:      r.body,
-        createdAt: r.created_at,
+        id:            r.id,
+        authorId:      r.author_id,
+        author:        r.author_username,
+        body:          r.body,
+        createdAt:     r.created_at,
+        parentReplyId: r.parent_reply_id || null,
+        parentAuthor:  r.parent_author   || null,
+        parentExcerpt: r.parent_excerpt  || null,
       },
     };
   },
@@ -725,11 +738,81 @@ export const api = {
   },
 
   async setGroupMembers(groupId, memberIds) {
+    // Note: this RPC now *invites* new members rather than adding them
+    // directly — the new member only appears in `getGroups()` after they
+    // accept their invitation. Existing-member removals still happen
+    // immediately. See schema.v2.sql for details.
     await rpc('set_group_members', {
       p_group_id:   groupId,
       p_member_ids: memberIds,
     });
     return { message: 'Members updated' };
+  },
+
+  // ---- Group invitations ----
+
+  async inviteToGroup(groupId, inviteeIds) {
+    const sent = await rpc('invite_to_group', {
+      p_group_id:    groupId,
+      p_invitee_ids: inviteeIds,
+    });
+    return { sent: sent || 0 };
+  },
+
+  async listMyGroupInvitations() {
+    const rows = await rpc('list_my_pending_group_invitations');
+    return {
+      invitations: (rows || []).map((r) => ({
+        id:        r.id,
+        group:     {
+          id:        r.group_id,
+          name:      r.group_name,
+          color:     r.group_color,
+          avatarKey: r.group_avatar_key,
+          avatarUrl: r.group_avatar_url,
+        },
+        inviter:   {
+          id:        r.inviter_id,
+          username:  r.inviter_username,
+          avatarKey: r.inviter_avatar_key,
+          avatarUrl: r.inviter_avatar_url,
+        },
+        memberCount: r.member_count || 0,
+        createdAt:   r.created_at,
+      })),
+    };
+  },
+
+  // Admin-side: pending invites for a group, for the "Pending — cancel" rows
+  // in the group editor. Returns [] for non-admins (RPC filters them out).
+  async listGroupInvitations(groupId) {
+    const rows = await rpc('list_group_pending_invitations', { p_group_id: groupId });
+    return {
+      invitations: (rows || []).map((r) => ({
+        id:        r.id,
+        invitee:   {
+          id:        r.invitee_id,
+          username:  r.invitee_username,
+          avatarKey: r.invitee_avatar_key,
+          avatarUrl: r.invitee_avatar_url,
+        },
+        inviterId: r.inviter_id,
+        createdAt: r.created_at,
+      })),
+    };
+  },
+
+  async respondGroupInvitation(invitationId, accept) {
+    await rpc('respond_to_group_invitation', {
+      p_invitation_id: invitationId,
+      p_accept:        !!accept,
+    });
+    return { message: accept ? 'Joined' : 'Declined' };
+  },
+
+  async cancelGroupInvitation(invitationId) {
+    await rpc('cancel_group_invitation', { p_invitation_id: invitationId });
+    return { message: 'Invitation cancelled' };
   },
 };
 

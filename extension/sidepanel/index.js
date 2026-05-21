@@ -979,8 +979,14 @@ function renderThreadMessage(m) {
 
 function renderInlineReply(r) {
   const isMine = currentUser && r.authorId === currentUser.id;
+  // When this reply quotes another reply, surface a tiny ↪ above it so the
+  // chain is visible even in the compact inline list under the share card.
+  const quotedLine = r.parentReplyId && r.parentAuthor
+    ? `<span class="thread-msg__inline-reply-quote" data-jump-reply="${escapeAttr(r.parentReplyId)}">↪ ${escapeHtml(r.parentAuthor)}</span>`
+    : '';
   return `
     <div class="thread-msg__inline-reply${isMine ? ' thread-msg__inline-reply--mine' : ''}" data-reply-id="${escapeAttr(r.id)}">
+      ${quotedLine}
       <span class="thread-msg__inline-reply-author">${escapeHtml(r.author)}</span>
       <span class="thread-msg__inline-reply-body">${escapeHtml(r.body)}</span>
       ${isMine ? `<button class="thread-msg__inline-reply-delete" data-reply-delete="${escapeAttr(r.id)}" title="Delete">&times;</button>` : ''}
@@ -993,11 +999,46 @@ function renderThreadReplyMessage(r, parentShare) {
   const wrapper = document.createElement('div');
   wrapper.className = `thread-reply-msg thread-reply-msg--${isMine ? 'out' : 'in'}`;
   wrapper.dataset.replyId = r.id;
+  wrapper.id = `reply-${r.id}`;
   const authorAvatar = avatarHtml(r.author, r.avatarKey, 'sm', r.avatarUrl);
   const time = timeAgo(r.createdAt);
   const parentTitle = parentShare
     ? (parentShare.ogTitle || parentShare.title || truncateUrl(parentShare.url, 40))
     : null;
+
+  // If this reply quotes another reply, render the quote pill INSTEAD of the
+  // share-link ref — the quote is more specific context and saves a row.
+  // Clicking it scrolls to and flashes the parent reply bubble.
+  const refHtml = (r.parentReplyId && r.parentAuthor)
+    ? `<a class="thread-reply-msg__ref thread-reply-msg__ref--reply" href="#reply-${escapeAttr(r.parentReplyId)}" data-jump-reply="${escapeAttr(r.parentReplyId)}" title="${escapeAttr(r.parentExcerpt || '')}">↪ ${escapeHtml(r.parentAuthor)}: ${escapeHtml(r.parentExcerpt || '')}</a>`
+    : (parentTitle
+        ? `<a class="thread-reply-msg__ref" href="#share-${escapeAttr(parentShare.id)}" data-jump-share="${escapeAttr(parentShare.id)}">↪ ${escapeHtml(parentTitle)}</a>`
+        : '');
+
+  // Reply-on-reply: small "Reply" button on the bubble. Available to every
+  // viewer (not just the author). Toggling reveals an inline text-only
+  // composer below — links/shares belong on the + composer at the top of
+  // the thread, replies-to-replies stay conversational.
+  const replyBtnHtml = parentShare
+    ? `<button class="thread-reply-msg__reply-btn" data-reply-to-reply="${escapeAttr(r.id)}" title="Reply to ${escapeAttr(r.author)}">
+         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+       </button>`
+    : '';
+
+  // Composer is hidden by default; the reply button reveals it. Lives
+  // outside the bubble so it can span the bubble's width without picking
+  // up the bubble's max-width / accent tint. Submit posts to the same
+  // parent share with parent_reply_id set to this reply's id.
+  const composerHtml = parentShare
+    ? `<form class="thread-reply-msg__reply-form" data-share-id="${escapeAttr(parentShare.id)}" data-parent-reply-id="${escapeAttr(r.id)}" hidden>
+         <div class="thread-reply-msg__reply-quote">Replying to <strong>${escapeHtml(r.author)}</strong></div>
+         <div class="thread-reply-msg__reply-row">
+           <input class="input thread-reply-msg__reply-body" type="text" placeholder="Reply to ${escapeAttr(r.author)}..." maxlength="1000" autocomplete="off">
+           <button type="button" class="thread-reply-msg__reply-cancel" data-reply-cancel title="Cancel">&times;</button>
+           <button type="submit" class="btn btn--primary btn--sm thread-reply-msg__reply-send" hidden>Send</button>
+         </div>
+       </form>`
+    : '';
 
   wrapper.innerHTML = `
     <div class="thread-reply-msg__row">
@@ -1007,13 +1048,17 @@ function renderThreadReplyMessage(r, parentShare) {
           <span class="thread-reply-msg__author">${escapeHtml(r.author)}</span>
           <span class="thread-reply-msg__time">${time}</span>
         </div>
-        ${parentTitle ? `<a class="thread-reply-msg__ref" href="#share-${escapeAttr(parentShare.id)}" data-jump-share="${escapeAttr(parentShare.id)}">↪ ${escapeHtml(parentTitle)}</a>` : ''}
+        ${refHtml}
         <p class="thread-reply-msg__body">${escapeHtml(r.body)}</p>
-        ${isMine ? `<button class="thread-reply-msg__delete" data-reply-delete="${escapeAttr(r.id)}" title="Delete">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>` : ''}
+        <div class="thread-reply-msg__actions">
+          ${replyBtnHtml}
+          ${isMine ? `<button class="thread-reply-msg__delete" data-reply-delete="${escapeAttr(r.id)}" title="Delete">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>` : ''}
+        </div>
       </div>
     </div>
+    ${composerHtml}
   `;
   return wrapper;
 }
@@ -1063,6 +1108,69 @@ $threadMessages.addEventListener('click', async (e) => {
     return;
   }
 
+  // Quote pill on a reply bubble (or its inline echo under the share card)
+  // jumps to the parent reply and flashes it. Same animation as share jump.
+  const jumpReplyRef = e.target.closest('[data-jump-reply]');
+  if (jumpReplyRef) {
+    e.preventDefault();
+    const target = $threadMessages.querySelector(`.thread-reply-msg[data-reply-id="${jumpReplyRef.dataset.jumpReply}"]`);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.add('thread-reply-msg--flash');
+      setTimeout(() => target.classList.remove('thread-reply-msg--flash'), 1500);
+    }
+    return;
+  }
+
+  // Cancel button inside the reply-to-reply composer — collapse it back.
+  const cancelBtn = e.target.closest('[data-reply-cancel]');
+  if (cancelBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    const form = cancelBtn.closest('.thread-reply-msg__reply-form');
+    if (form) {
+      form.hidden = true;
+      const input = form.querySelector('.thread-reply-msg__reply-body');
+      const send  = form.querySelector('.thread-reply-msg__reply-send');
+      if (input) input.value = '';
+      if (send)  send.hidden = true;
+    }
+    return;
+  }
+
+  // Reply-on-reply: toggle the inline composer below the reply bubble. Only
+  // one composer open at a time — opening one closes any other open ones to
+  // avoid stacking multiple half-typed drafts.
+  const replyOnReplyBtn = e.target.closest('[data-reply-to-reply]');
+  if (replyOnReplyBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    const replyMsg = replyOnReplyBtn.closest('.thread-reply-msg');
+    const form = replyMsg && replyMsg.querySelector(':scope > .thread-reply-msg__reply-form');
+    if (!form) return;
+    const willOpen = form.hidden;
+    $threadMessages.querySelectorAll('.thread-reply-msg__reply-form:not([hidden])').forEach((other) => {
+      if (other !== form) {
+        other.hidden = true;
+        const i = other.querySelector('.thread-reply-msg__reply-body');
+        const s = other.querySelector('.thread-reply-msg__reply-send');
+        if (i) i.value = '';
+        if (s) s.hidden = true;
+      }
+    });
+    form.hidden = !willOpen;
+    if (willOpen) {
+      const input = form.querySelector('.thread-reply-msg__reply-body');
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (input) {
+          input.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          setTimeout(() => input.focus({ preventScroll: true }), 60);
+        }
+      }));
+    }
+    return;
+  }
+
   // Don't toggle when interacting with the link, the reply composer, an
   // inline reply row, or a standalone reply bubble.
   if (e.target.closest('.thread-msg__url, .thread-msg__reply-form, .thread-msg__inline-reply, .thread-reply-msg')) return;
@@ -1071,8 +1179,22 @@ $threadMessages.addEventListener('click', async (e) => {
   if (card) {
     card.classList.toggle('thread-msg--expanded');
     if (card.classList.contains('thread-msg--expanded')) {
+      // If the share composer is open with nothing typed, close it — the user
+      // is switching to inline-reply mode, and an open composer would overlap
+      // the reply input on the last message.
+      if (!$threadShareForm.hidden && !$threadUrlInput.value.trim()) {
+        closeThreadShareForm();
+      }
       const input = card.querySelector('.thread-msg__reply-body');
-      if (input) setTimeout(() => input.focus(), 50);
+      // Double rAF so the expansion's added height is in the layout before we
+      // scroll; block:'nearest' lets the browser pick the closest scrollable
+      // ancestor whether body or .thread-messages is the active scroller.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (input) {
+          input.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          setTimeout(() => input.focus({ preventScroll: true }), 60);
+        }
+      }));
     }
   }
 });
@@ -1082,16 +1204,56 @@ $threadMessages.addEventListener('click', async (e) => {
 // URL (i.e. the reply is about to become a link-share card).
 $threadMessages.addEventListener('input', (e) => {
   const bodyInput = e.target.closest('.thread-msg__reply-body');
-  if (!bodyInput) return;
-  const form = bodyInput.closest('.thread-msg__reply-form');
-  const noteInput = form.querySelector('.thread-msg__reply-note');
-  const sendBtn   = form.querySelector('.thread-msg__reply-btn');
-  const text = bodyInput.value.trim();
-  sendBtn.hidden = text.length === 0;
-  noteInput.hidden = !isValidUrl(text);
+  if (bodyInput) {
+    const form = bodyInput.closest('.thread-msg__reply-form');
+    const noteInput = form.querySelector('.thread-msg__reply-note');
+    const sendBtn   = form.querySelector('.thread-msg__reply-btn');
+    const text = bodyInput.value.trim();
+    sendBtn.hidden = text.length === 0;
+    noteInput.hidden = !isValidUrl(text);
+    return;
+  }
+
+  // Reply-on-reply composer (text-only — no URL→share path here).
+  const bubbleInput = e.target.closest('.thread-reply-msg__reply-body');
+  if (bubbleInput) {
+    const sendBtn = bubbleInput.closest('.thread-reply-msg__reply-form')
+                               .querySelector('.thread-reply-msg__reply-send');
+    sendBtn.hidden = bubbleInput.value.trim().length === 0;
+  }
 });
 
 $threadMessages.addEventListener('submit', async (e) => {
+  // Reply-on-reply composer (attached to a standalone reply bubble): always
+  // text-only, posts a new reply to the parent share with parent_reply_id
+  // pointing at the reply we're replying to.
+  const replyToReplyForm = e.target.closest('.thread-reply-msg__reply-form');
+  if (replyToReplyForm) {
+    e.preventDefault();
+    if (!currentThread) return;
+    const bodyInput = replyToReplyForm.querySelector('.thread-reply-msg__reply-body');
+    const sendBtn   = replyToReplyForm.querySelector('.thread-reply-msg__reply-send');
+    const text = bodyInput.value.trim();
+    if (!text) return;
+    sendBtn.disabled = true;
+    try {
+      await api.postReply(
+        replyToReplyForm.dataset.shareId,
+        text,
+        replyToReplyForm.dataset.parentReplyId,
+      );
+      bodyInput.value = '';
+      sendBtn.hidden  = true;
+      replyToReplyForm.hidden = true;
+      openConversation(currentThread);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      sendBtn.disabled = false;
+    }
+    return;
+  }
+
   const form = e.target.closest('.thread-msg__reply-form');
   if (!form) return;
   e.preventDefault();
@@ -2017,6 +2179,9 @@ if ($notificationsToggle) {
 const $groupsList       = document.getElementById('groups-list');
 const $groupsEmpty      = document.getElementById('groups-empty');
 const $newGroupBtn      = document.getElementById('new-group-btn');
+const $groupInvitationsSection = document.getElementById('group-invitations-section');
+const $groupInvitationsList    = document.getElementById('group-invitations-list');
+const $groupInvitationsCount   = document.getElementById('group-invitations-count');
 const $groupEditor      = document.getElementById('group-editor');
 const $groupEditorTitle = document.getElementById('group-editor-title');
 const $groupEditorName  = document.getElementById('group-editor-name');
@@ -2038,16 +2203,76 @@ let groupEditorColor = GROUP_COLORS[0];
 let groupEditorAvatarKey = null;
 let groupEditorAvatarUrl = null;
 let groupEditorMembers = new Set();
+// Friends keyed by id for the lifetime of the open editor — lets the cancel
+// handler rebuild a normal checkbox row after a pending invite is cancelled.
+let groupEditorFriendsById = new Map();
 
 async function loadGroups() {
   try {
-    const { groups } = await api.getGroups();
+    const [{ groups }, invitationsResult] = await Promise.all([
+      api.getGroups(),
+      api.listMyGroupInvitations().catch(() => ({ invitations: [] })),
+    ]);
     groupsCache = groups;
     renderGroupsList();
+    renderGroupInvitations(invitationsResult.invitations || []);
   } catch (err) {
     showError(err.message);
   }
 }
+
+function renderGroupInvitations(invitations) {
+  $groupInvitationsList.innerHTML = '';
+  if (!invitations.length) {
+    $groupInvitationsSection.hidden = true;
+    return;
+  }
+  $groupInvitationsSection.hidden = false;
+  $groupInvitationsCount.textContent = invitations.length;
+  invitations.forEach((inv) => {
+    const li = document.createElement('li');
+    li.className = 'circle-row circle-row--invitation';
+    li.dataset.invitationId = inv.id;
+    const groupForAvatar = {
+      name: inv.group.name, color: inv.group.color,
+      avatarKey: inv.group.avatarKey, avatarUrl: inv.group.avatarUrl,
+    };
+    li.innerHTML = `
+      ${groupAvatarHtml(groupForAvatar, 'sm')}
+      <div class="circle-row__info">
+        <span class="circle-row__name">${escapeHtml(inv.group.name)}</span>
+        <span class="circle-row__members">Invited by ${escapeHtml(inv.inviter.username)} · ${inv.memberCount} member${inv.memberCount === 1 ? '' : 's'}</span>
+      </div>
+      <div class="circle-row__actions">
+        <button class="btn btn--sm btn--primary" data-invitation-accept="${escapeAttr(inv.id)}">Accept</button>
+        <button class="btn btn--sm btn--ghost" data-invitation-decline="${escapeAttr(inv.id)}">Decline</button>
+      </div>
+    `;
+    $groupInvitationsList.appendChild(li);
+  });
+}
+
+// Single delegated handler for Accept/Decline. Disables both buttons while
+// the request is in flight to prevent double-clicks; refreshes the list on
+// completion so accepted groups appear and declined invites disappear.
+$groupInvitationsList.addEventListener('click', async (e) => {
+  const acceptBtn  = e.target.closest('[data-invitation-accept]');
+  const declineBtn = e.target.closest('[data-invitation-decline]');
+  const btn = acceptBtn || declineBtn;
+  if (!btn) return;
+  const row = btn.closest('.circle-row--invitation');
+  const id  = btn.dataset.invitationAccept || btn.dataset.invitationDecline;
+  const accept = !!acceptBtn;
+  row.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+  try {
+    await api.respondGroupInvitation(id, accept);
+    showToast(accept ? 'Joined group' : 'Invitation declined', 'success');
+    loadGroups();
+  } catch (err) {
+    showToast(err.message, 'error');
+    row.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+  }
+});
 
 function renderGroupsList() {
   $groupsList.innerHTML = '';
@@ -2179,38 +2404,75 @@ async function openGroupEditor(group) {
   if ($groupEditorMemberSearch) $groupEditorMemberSearch.value = '';
 
   try {
-    const { friends } = await api.getFriends();
+    // Existing groups may have outstanding invites — fetch them alongside the
+    // friend list so invited-but-not-joined friends render as "Pending" rows
+    // instead of plain checkboxes. New groups have none.
+    const [{ friends }, { invitations: pending }] = await Promise.all([
+      api.getFriends(),
+      editingGroup
+        ? api.listGroupInvitations(editingGroup.id).catch(() => ({ invitations: [] }))
+        : Promise.resolve({ invitations: [] }),
+    ]);
+    groupEditorFriendsById = new Map(friends.map((f) => [f.user.id, f.user]));
     if (friends.length === 0) {
       $groupEditorMembers.innerHTML = '<p class="picker__empty">Add some friends first.</p>';
       return;
     }
+    const pendingByInvitee = new Map(pending.map((inv) => [inv.invitee.id, inv.id]));
     $groupEditorMembers.innerHTML = '';
     friends.forEach((f) => {
-      const item = document.createElement('label');
-      item.className = 'picker__friend';
-      item.dataset.username = f.user.username.toLowerCase();
-      const checked = groupEditorMembers.has(f.user.id) ? 'checked' : '';
-      item.innerHTML = `
-        <input type="checkbox" class="picker__checkbox" value="${escapeAttr(f.user.id)}" ${checked}>
-        ${avatarHtml(f.user.username, f.user.avatarKey, 'sm', f.user.avatarUrl)}
-        <span class="picker__name">${escapeHtml(f.user.username)}</span>
-      `;
-      const cb = item.querySelector('input');
-      cb.addEventListener('change', () => {
-        if (cb.checked) groupEditorMembers.add(f.user.id);
-        else            groupEditorMembers.delete(f.user.id);
-      });
-      $groupEditorMembers.appendChild(item);
+      $groupEditorMembers.appendChild(
+        buildGroupEditorFriendRow(f.user, pendingByInvitee.get(f.user.id) || null)
+      );
     });
   } catch (err) {
     $groupEditorMembers.innerHTML = `<p class="picker__empty">${escapeHtml(err.message)}</p>`;
   }
 }
 
+// Build one row for the editor's friend list. Friends with a pending invite
+// render as a non-interactive "Pending" row with a Cancel (×) button (they
+// can't be re-added while invited); everyone else gets the usual member
+// checkbox. Both carry data-username so the search filter keeps working.
+function buildGroupEditorFriendRow(user, pendingInvitationId) {
+  if (pendingInvitationId) {
+    const row = document.createElement('div');
+    row.className = 'picker__friend picker__friend--pending';
+    row.dataset.username = user.username.toLowerCase();
+    row.dataset.userId = user.id;
+    row.innerHTML = `
+      ${avatarHtml(user.username, user.avatarKey, 'sm', user.avatarUrl)}
+      <span class="picker__name">${escapeHtml(user.username)}</span>
+      <span class="picker__pending-pill">Pending</span>
+      <button type="button" class="picker__cancel-invite"
+              data-cancel-invitation="${escapeAttr(pendingInvitationId)}"
+              data-user-id="${escapeAttr(user.id)}" title="Cancel invitation">&times;</button>
+    `;
+    return row;
+  }
+  const item = document.createElement('label');
+  item.className = 'picker__friend';
+  item.dataset.username = user.username.toLowerCase();
+  item.dataset.userId = user.id;
+  const checked = groupEditorMembers.has(user.id) ? 'checked' : '';
+  item.innerHTML = `
+    <input type="checkbox" class="picker__checkbox" value="${escapeAttr(user.id)}" ${checked}>
+    ${avatarHtml(user.username, user.avatarKey, 'sm', user.avatarUrl)}
+    <span class="picker__name">${escapeHtml(user.username)}</span>
+  `;
+  const cb = item.querySelector('input');
+  cb.addEventListener('change', () => {
+    if (cb.checked) groupEditorMembers.add(user.id);
+    else            groupEditorMembers.delete(user.id);
+  });
+  return item;
+}
+
 function closeGroupEditor() {
   $groupEditor.hidden = true;
   editingGroup = null;
   groupEditorMembers.clear();
+  groupEditorFriendsById.clear();
 }
 
 $newGroupBtn.addEventListener('click', () => openGroupEditor(null));
@@ -2225,6 +2487,38 @@ if ($groupEditorMemberSearch) {
     });
   });
 }
+
+// Cancel a pending invite from within the editor. On success the row reverts
+// to a normal (unchecked) checkbox row so the admin can re-invite if they
+// change their mind — re-applying the active search filter so it doesn't
+// reappear under a query it shouldn't match.
+$groupEditorMembers.addEventListener('click', async (e) => {
+  const cancelBtn = e.target.closest('[data-cancel-invitation]');
+  if (!cancelBtn) return;
+  e.preventDefault();
+  const invitationId = cancelBtn.dataset.cancelInvitation;
+  const userId       = cancelBtn.dataset.userId;
+  const row          = cancelBtn.closest('.picker__friend');
+  cancelBtn.disabled = true;
+  try {
+    await api.cancelGroupInvitation(invitationId);
+    showToast('Invitation cancelled', 'success');
+    const user = groupEditorFriendsById.get(userId);
+    if (user && row) {
+      groupEditorMembers.delete(userId);
+      const fresh = buildGroupEditorFriendRow(user, null);
+      const q = $groupEditorMemberSearch ? $groupEditorMemberSearch.value.trim().toLowerCase() : '';
+      if (q && !(fresh.dataset.username || '').includes(q)) fresh.hidden = true;
+      row.replaceWith(fresh);
+    } else if (row) {
+      row.remove();
+    }
+  } catch (err) {
+    showToast(err.message, 'error');
+    cancelBtn.disabled = false;
+  }
+});
+
 $groupEditor.addEventListener('click', (e) => { if (e.target === $groupEditor) closeGroupEditor(); });
 
 $groupEditorSave.addEventListener('click', async () => {
@@ -2253,8 +2547,21 @@ $groupEditorSave.addEventListener('click', async () => {
       const { group } = await api.createGroup(name, { color: groupEditorColor, avatarKey: groupEditorAvatarKey });
       groupId = group.id;
     }
+    // Detect added-vs-existing so the toast can honestly say "invites sent"
+    // only when there's actually a new member who'll receive one. (Removing
+    // someone or renaming the group shouldn't claim invites were sent.)
+    const existingMemberIds = new Set(
+      (editingGroup?.members || [])
+        .map((m) => m.id)
+        .filter((id) => !currentUser || id !== currentUser.id)
+    );
+    const newlyAdded = [...groupEditorMembers].filter((id) => !existingMemberIds.has(id));
     await api.setGroupMembers(groupId, [...groupEditorMembers]);
-    showToast(editingGroup ? 'Group saved' : 'Group created', 'success');
+    const toastMsg = newlyAdded.length > 0
+      ? (editingGroup ? `Invites sent to ${newlyAdded.length} friend${newlyAdded.length === 1 ? '' : 's'}`
+                      : `Group created — ${newlyAdded.length} invite${newlyAdded.length === 1 ? '' : 's'} sent`)
+      : (editingGroup ? 'Group saved' : 'Group created');
+    showToast(toastMsg, 'success');
     closeGroupEditor();
     loadGroups();
   } catch (err) {

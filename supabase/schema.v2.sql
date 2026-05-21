@@ -159,6 +159,15 @@ create table if not exists public.share_replies (
   created_at timestamptz not null default now()
 );
 
+-- Reply-to-reply: nullable pointer at another reply on the SAME share.
+-- `on delete set null` so deleting a reply doesn't cascade-wipe child replies;
+-- they just lose their quoted-parent indicator. The same-share invariant is
+-- enforced inside post_share_reply (defense-in-depth — RLS already prevents
+-- inserting a reply against an invisible share).
+alter table public.share_replies
+  add column if not exists parent_reply_id uuid
+    references public.share_replies(id) on delete set null;
+
 create index if not exists share_replies_share_created_idx
   on public.share_replies (share_id, created_at asc);
 
@@ -358,43 +367,85 @@ create policy share_replies_delete_author on public.share_replies for delete
   to authenticated
   using (author_id = auth.uid());
 
+-- The return-column list changed (added parent_*), so drop the old signature
+-- first — `create or replace function` can't change a function's return shape.
+drop function if exists public.list_share_replies(uuid);
 create or replace function public.list_share_replies(p_share_id uuid)
 returns table (
   id uuid, author_id uuid, author_username varchar,
-  author_avatar_key varchar, body varchar, created_at timestamptz
+  author_avatar_key varchar, body varchar, created_at timestamptz,
+  parent_reply_id uuid, parent_author varchar, parent_excerpt text
 )
 language sql security invoker set search_path = public stable
 as $$
-  select r.id, r.author_id, p.username, p.avatar_key, r.body, r.created_at
+  select
+    r.id, r.author_id, p.username, p.avatar_key, r.body, r.created_at,
+    r.parent_reply_id,
+    pr_author.username as parent_author,
+    case when pr.body is null then null
+         else left(pr.body, 80) end as parent_excerpt
   from public.share_replies r
   join public.profiles p on p.id = r.author_id
+  left join public.share_replies pr on pr.id = r.parent_reply_id
+  left join public.profiles pr_author on pr_author.id = pr.author_id
   where r.share_id = p_share_id
   order by r.created_at asc;
 $$;
 
 grant execute on function public.list_share_replies(uuid) to authenticated;
 
-create or replace function public.post_share_reply(p_share_id uuid, p_body text)
+-- post_share_reply: signature changed (added p_parent_reply_id and parent_* in
+-- the return shape), so drop first.
+drop function if exists public.post_share_reply(uuid, text);
+drop function if exists public.post_share_reply(uuid, text, uuid);
+create or replace function public.post_share_reply(
+  p_share_id        uuid,
+  p_body            text,
+  p_parent_reply_id uuid default null
+)
 returns table (
   id uuid, author_id uuid, author_username varchar,
-  author_avatar_key varchar, body varchar, created_at timestamptz
+  author_avatar_key varchar, body varchar, created_at timestamptz,
+  parent_reply_id uuid, parent_author varchar, parent_excerpt text
 )
 language plpgsql security invoker set search_path = public
 as $$
 declare new_id uuid;
 begin
-  insert into public.share_replies (share_id, author_id, body)
-  values (p_share_id, auth.uid(), p_body)
+  -- Same-share invariant: a reply can only quote another reply on the same
+  -- share. Without this, a user could plant a reference to a reply they
+  -- can't see (the row insert would still succeed under RLS, since author
+  -- and target-share are both validated, but the quote excerpt would leak
+  -- into responses).
+  if p_parent_reply_id is not null then
+    if not exists (
+      select 1 from public.share_replies pr
+      where pr.id = p_parent_reply_id and pr.share_id = p_share_id
+    ) then
+      raise exception 'Parent reply must belong to the same share';
+    end if;
+  end if;
+
+  insert into public.share_replies (share_id, author_id, body, parent_reply_id)
+  values (p_share_id, auth.uid(), p_body, p_parent_reply_id)
   returning share_replies.id into new_id;
+
   return query
-    select r.id, r.author_id, p.username, p.avatar_key, r.body, r.created_at
+    select
+      r.id, r.author_id, p.username, p.avatar_key, r.body, r.created_at,
+      r.parent_reply_id,
+      pr_author.username as parent_author,
+      case when pr.body is null then null
+           else left(pr.body, 80) end as parent_excerpt
     from public.share_replies r
     join public.profiles p on p.id = r.author_id
+    left join public.share_replies pr on pr.id = r.parent_reply_id
+    left join public.profiles pr_author on pr_author.id = pr.author_id
     where r.id = new_id;
 end;
 $$;
 
-grant execute on function public.post_share_reply(uuid, text) to authenticated;
+grant execute on function public.post_share_reply(uuid, text, uuid) to authenticated;
 
 create or replace function public.reply_counts_for_shares(p_share_ids uuid[])
 returns table (share_id uuid, count int)
@@ -1172,10 +1223,16 @@ as $$
                 'avatar_key', a.avatar_key,
                 'avatar_url', a.avatar_url,
                 'body', r.body,
-                'created_at', r.created_at
+                'created_at', r.created_at,
+                'parent_reply_id', r.parent_reply_id,
+                'parent_author',   pr_author.username,
+                'parent_excerpt',  case when pr.body is null then null
+                                        else left(pr.body, 80) end
               ) order by r.created_at asc)
          from public.share_replies r
          join public.profiles a on a.id = r.author_id
+         left join public.share_replies pr on pr.id = r.parent_reply_id
+         left join public.profiles pr_author on pr_author.id = pr.author_id
         where r.share_id = p.id),
       '[]'::json
     ) as replies
@@ -1436,7 +1493,7 @@ $$;
 grant execute on function public.get_conversations(timestamptz, int) to authenticated;
 
 -- ===========================================================================
--- PATCH: fix get_conversation_thread — outgoing peer shares were filtered out
+-- PATCH: fix get_conversation_thread (FINAL) — outgoing peer shares + parent reply fields
 -- ===========================================================================
 -- The earlier definitions of this function used a LEFT JOIN restricted to
 -- `sr.recipient_id = auth.uid()`, then required `sr.recipient_id = p_peer_id`
@@ -1513,10 +1570,16 @@ as $$
                 'avatar_key', a.avatar_key,
                 'avatar_url', a.avatar_url,
                 'body', r.body,
-                'created_at', r.created_at
+                'created_at', r.created_at,
+                'parent_reply_id', r.parent_reply_id,
+                'parent_author',   pr_author.username,
+                'parent_excerpt',  case when pr.body is null then null
+                                        else left(pr.body, 80) end
               ) order by r.created_at asc)
          from public.share_replies r
          join public.profiles a on a.id = r.author_id
+         left join public.share_replies pr on pr.id = r.parent_reply_id
+         left join public.profiles pr_author on pr_author.id = pr.author_id
         where r.share_id = p.id),
       '[]'::json
     ) as replies
@@ -1527,3 +1590,294 @@ as $$
 $$;
 
 grant execute on function public.get_conversation_thread(uuid, uuid, int) to authenticated;
+
+-- ===========================================================================
+-- Group invitations
+-- ===========================================================================
+-- Adding a friend to a group is now a two-step process:
+--   1. Admin invites a friend  → row in group_invitations (status='pending').
+--   2. Friend accepts          → row in group_members + status='accepted'.
+-- This replaces the previous direct-add behavior of set_group_members for
+-- new members. Existing members are unchanged; removals still happen
+-- directly. Cancellations + declines just flip the row status and never
+-- write to group_members.
+--
+-- All writes go through SECURITY DEFINER RPCs so we can atomically maintain
+-- the invariants (one pending per pair; insert into group_members on accept).
+-- SELECT is policy-gated so the client can read directly when needed.
+
+create table if not exists public.group_invitations (
+  id           uuid primary key default uuid_generate_v4(),
+  group_id     uuid not null references public.groups(id) on delete cascade,
+  invitee_id   uuid not null references public.profiles(id) on delete cascade,
+  inviter_id   uuid not null references public.profiles(id) on delete cascade,
+  status       varchar(10) not null default 'pending'
+               check (status in ('pending','accepted','declined','cancelled')),
+  created_at   timestamptz not null default now(),
+  responded_at timestamptz
+);
+
+-- One pending invite per (group, invitee). Past responses don't block a
+-- re-invite — the admin can invite again after a decline/cancel.
+create unique index if not exists group_invitations_one_pending_idx
+  on public.group_invitations (group_id, invitee_id)
+  where status = 'pending';
+
+create index if not exists group_invitations_invitee_status_idx
+  on public.group_invitations (invitee_id, status);
+create index if not exists group_invitations_group_status_idx
+  on public.group_invitations (group_id, status);
+
+alter table public.group_invitations enable row level security;
+
+-- SELECT: invitee can see own invites; group admins can see invites for
+-- their groups.
+drop policy if exists group_invitations_select_self_or_admin on public.group_invitations;
+create policy group_invitations_select_self_or_admin on public.group_invitations for select
+  to authenticated
+  using (invitee_id = auth.uid() or public.is_group_admin(group_id));
+
+-- INSERT/UPDATE/DELETE are NOT exposed via policies — the RPCs below are the
+-- only path. (No policy = no access for `authenticated`.)
+
+-- ---- RPCs --------------------------------------------------------------
+
+-- Invite one or more friends. Skips IDs already invited (pending), already
+-- members, or not friends. Returns the count of invitations actually sent.
+
+create or replace function public.invite_to_group(
+  p_group_id uuid, p_invitee_ids uuid[]
+)
+returns int
+language plpgsql security definer set search_path = public
+as $$
+declare
+  iid uuid;
+  sent int := 0;
+begin
+  if not public.is_group_admin(p_group_id) then
+    raise exception 'Not authorized' using errcode = '42501';
+  end if;
+  if p_invitee_ids is null then return 0; end if;
+
+  foreach iid in array p_invitee_ids loop
+    continue when iid = auth.uid();
+    -- Friendship requirement mirrors the group_members_insert_admin policy.
+    continue when not public.are_friends(auth.uid(), iid);
+    -- Skip if already a member.
+    continue when exists (
+      select 1 from public.group_members
+      where group_id = p_group_id and member_id = iid
+    );
+    -- Skip if there's already a pending invite (the partial unique index
+    -- would also enforce this, but checking up front avoids the raised
+    -- error and keeps the count honest).
+    continue when exists (
+      select 1 from public.group_invitations
+      where group_id = p_group_id and invitee_id = iid and status = 'pending'
+    );
+
+    insert into public.group_invitations (group_id, invitee_id, inviter_id)
+    values (p_group_id, iid, auth.uid());
+    sent := sent + 1;
+  end loop;
+
+  return sent;
+end;
+$$;
+
+revoke all on function public.invite_to_group(uuid, uuid[]) from public;
+grant execute on function public.invite_to_group(uuid, uuid[]) to authenticated;
+
+-- Invitee responds. On accept, atomically flips status + inserts the
+-- group_members row. On decline, just flips status.
+
+create or replace function public.respond_to_group_invitation(
+  p_invitation_id uuid, p_accept boolean
+)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare inv record;
+begin
+  select * into inv from public.group_invitations
+   where id = p_invitation_id;
+  if not found then
+    raise exception 'Invitation not found';
+  end if;
+  if inv.invitee_id <> auth.uid() then
+    raise exception 'Not authorized' using errcode = '42501';
+  end if;
+  if inv.status <> 'pending' then
+    raise exception 'Invitation already %', inv.status;
+  end if;
+
+  if p_accept then
+    update public.group_invitations
+       set status = 'accepted', responded_at = now()
+     where id = inv.id;
+    insert into public.group_members (group_id, member_id, role)
+    values (inv.group_id, inv.invitee_id, 'member')
+    on conflict (group_id, member_id) do nothing;
+  else
+    update public.group_invitations
+       set status = 'declined', responded_at = now()
+     where id = inv.id;
+  end if;
+end;
+$$;
+
+revoke all on function public.respond_to_group_invitation(uuid, boolean) from public;
+grant execute on function public.respond_to_group_invitation(uuid, boolean) to authenticated;
+
+-- Admin (or the original inviter) cancels a pending invite.
+
+create or replace function public.cancel_group_invitation(p_invitation_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare inv record;
+begin
+  select * into inv from public.group_invitations
+   where id = p_invitation_id;
+  if not found then
+    raise exception 'Invitation not found';
+  end if;
+  if not (inv.inviter_id = auth.uid() or public.is_group_admin(inv.group_id)) then
+    raise exception 'Not authorized' using errcode = '42501';
+  end if;
+  if inv.status <> 'pending' then return; end if;
+
+  update public.group_invitations
+     set status = 'cancelled', responded_at = now()
+   where id = inv.id;
+end;
+$$;
+
+revoke all on function public.cancel_group_invitation(uuid) from public;
+grant execute on function public.cancel_group_invitation(uuid) to authenticated;
+
+-- List the current user's pending invitations, with the group + inviter
+-- info needed to render the inbox row (name, color, avatar, who sent it,
+-- current member count for "small group" cues).
+
+create or replace function public.list_my_pending_group_invitations()
+returns table (
+  id              uuid,
+  group_id        uuid,
+  group_name      varchar,
+  group_color     varchar,
+  group_avatar_key varchar,
+  group_avatar_url text,
+  inviter_id      uuid,
+  inviter_username varchar,
+  inviter_avatar_key varchar,
+  inviter_avatar_url text,
+  member_count    int,
+  created_at      timestamptz
+)
+language sql security invoker set search_path = public stable
+as $$
+  select
+    inv.id, inv.group_id,
+    g.name as group_name, g.color as group_color,
+    g.avatar_key as group_avatar_key, g.avatar_url as group_avatar_url,
+    inv.inviter_id,
+    p.username as inviter_username,
+    p.avatar_key as inviter_avatar_key,
+    p.avatar_url as inviter_avatar_url,
+    (select count(*)::int from public.group_members gm where gm.group_id = g.id) as member_count,
+    inv.created_at
+  from public.group_invitations inv
+  join public.groups g on g.id = inv.group_id
+  join public.profiles p on p.id = inv.inviter_id
+  where inv.invitee_id = auth.uid()
+    and inv.status = 'pending'
+  order by inv.created_at desc;
+$$;
+
+grant execute on function public.list_my_pending_group_invitations() to authenticated;
+
+-- Admin-side counterpart: list the *pending* invitations for one group, with
+-- the invitee profile needed to render a "Pending — cancel" row in the group
+-- editor. SELECT runs as invoker, so the group_invitations RLS policy
+-- (invitee_id = auth.uid() OR is_group_admin(group_id)) already restricts
+-- this to the group's admins; the explicit is_group_admin guard short-circuits
+-- to an empty set for non-admins and documents the intent.
+
+create or replace function public.list_group_pending_invitations(p_group_id uuid)
+returns table (
+  id                 uuid,
+  invitee_id         uuid,
+  invitee_username   varchar,
+  invitee_avatar_key varchar,
+  invitee_avatar_url text,
+  inviter_id         uuid,
+  created_at         timestamptz
+)
+language sql security invoker set search_path = public stable
+as $$
+  select
+    inv.id, inv.invitee_id,
+    p.username as invitee_username,
+    p.avatar_key as invitee_avatar_key,
+    p.avatar_url as invitee_avatar_url,
+    inv.inviter_id, inv.created_at
+  from public.group_invitations inv
+  join public.profiles p on p.id = inv.invitee_id
+  where inv.group_id = p_group_id
+    and inv.status = 'pending'
+    and public.is_group_admin(p_group_id)
+  order by inv.created_at desc;
+$$;
+
+grant execute on function public.list_group_pending_invitations(uuid) to authenticated;
+
+-- ===========================================================================
+-- set_group_members: switch to invite-mode for new members
+-- ===========================================================================
+-- Removals still happen directly (admins can kick). New IDs now generate
+-- invites instead of inserting into group_members. Callers don't need to
+-- change — the editor still passes the desired final set; the function
+-- handles the "diff" itself.
+
+create or replace function public.set_group_members(
+  p_group_id uuid, p_member_ids uuid[]
+)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare mid uuid;
+begin
+  if not public.is_group_admin(p_group_id) then
+    raise exception 'Not authorized' using errcode = '42501';
+  end if;
+
+  -- Remove members no longer in the desired set (admin stays put).
+  delete from public.group_members
+   where group_id = p_group_id
+     and member_id <> auth.uid()
+     and (p_member_ids is null or not (member_id = any(p_member_ids)));
+
+  -- For desired IDs that aren't yet members, create pending invites
+  -- (skipping already-invited and non-friends, mirroring invite_to_group).
+  if p_member_ids is null then return; end if;
+  foreach mid in array p_member_ids loop
+    continue when mid = auth.uid();
+    continue when exists (
+      select 1 from public.group_members
+      where group_id = p_group_id and member_id = mid
+    );
+    continue when not public.are_friends(auth.uid(), mid);
+    continue when exists (
+      select 1 from public.group_invitations
+      where group_id = p_group_id and invitee_id = mid and status = 'pending'
+    );
+    insert into public.group_invitations (group_id, invitee_id, inviter_id)
+    values (p_group_id, mid, auth.uid());
+  end loop;
+end;
+$$;
+
+revoke all on function public.set_group_members(uuid, uuid[]) from public;
+grant execute on function public.set_group_members(uuid, uuid[]) to authenticated;

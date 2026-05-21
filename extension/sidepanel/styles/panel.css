@@ -34,6 +34,7 @@
   --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --nav-height: 56px;
 }
 
 /* ====== Dark Mode ====== */
@@ -1563,6 +1564,44 @@ body {
   font-weight: 500;
 }
 
+/* Pending-invite row in the group editor: same layout as a normal friend
+   row but no checkbox (the friend is invited, not yet a member). The pill
+   pushes to the right edge, with the cancel (×) button after it. */
+.picker__friend--pending { cursor: default; }
+.picker__friend--pending:hover { background: transparent; }
+
+.picker__pending-pill {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.picker__cancel-invite {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.picker__cancel-invite:hover { color: var(--color-error); background: var(--color-error-soft); }
+.picker__cancel-invite:disabled { opacity: 0.5; cursor: default; }
+
 .picker__footer {
   display: flex;
   gap: 8px;
@@ -2096,6 +2135,24 @@ body {
 .circle-row__edit { opacity: 0.5; }
 .circle-row:hover .circle-row__edit { opacity: 1; }
 
+/* Group invitation row — same layout as a normal circle-row but with a
+   pending-tinted background and Accept/Decline buttons instead of an edit
+   pencil. Cursor is default because the row itself isn't navigable — the
+   user must click an action. */
+.circle-row--invitation {
+  cursor: default;
+  background: var(--color-accent-soft);
+  border-color: var(--color-drop-border);
+}
+.circle-row--invitation:hover { border-color: var(--color-accent); }
+
+.circle-row__actions {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.circle-row__actions .btn { min-width: 0; }
+
 /* Circle editor overlay (reuses .picker structure) */
 
 .circle-editor__form { padding: 0 16px; }
@@ -2413,6 +2470,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
+  padding-bottom: var(--nav-height);
 }
 
 .thread-header {
@@ -2459,11 +2517,15 @@ body {
 
 .thread-messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 12px 12px 8px;
+  overscroll-behavior: contain;
+  padding: 12px 12px 16px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  background: var(--color-bg);
+  scroll-padding-bottom: 12px;
 }
 
 .thread-empty {
@@ -2479,22 +2541,24 @@ body {
   align-items: flex-start;
 }
 
-.thread-msg--out .thread-msg__row { flex-direction: row-reverse; }
+/* Avatar always sits on the left of the card — direction (out vs in) is
+   conveyed by the accent tint on outgoing bubbles, not by position. */
 
 .thread-msg__card {
   flex: 1;
   min-width: 0;
   max-width: 84%;
   background: var(--color-surface);
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   border-top-left-radius: 4px;
   padding: 8px 10px;
   cursor: pointer;
+  box-shadow: var(--shadow-sm);
   transition: box-shadow 0.15s var(--ease);
 }
 
-.thread-msg__card:hover { box-shadow: var(--shadow-sm); }
+.thread-msg__card:hover { box-shadow: var(--shadow-md); }
 
 /* Compact preview (always visible): badge + title + reply count chip */
 .thread-msg__compact {
@@ -2576,11 +2640,12 @@ body {
   background: var(--color-error-soft);
 }
 
-/* Outgoing keeps the same colors as incoming — direction is conveyed by the
-   avatar position only (row-reverse swaps the avatar to the right). */
+/* Outgoing bubbles get a subtle accent tint so direction is visible at a
+   glance when scanning a long thread. Corner radii are kept identical to
+   incoming since the avatar is always on the left. */
 .thread-msg--out .thread-msg__card {
-  border-top-left-radius: var(--radius-sm);
-  border-top-right-radius: 4px;
+  background: var(--color-accent-soft);
+  border-color: var(--color-drop-border);
 }
 
 .thread-msg__head {
@@ -2679,7 +2744,7 @@ body {
   align-items: flex-start;
 }
 
-.thread-reply-msg--out .thread-reply-msg__row { flex-direction: row-reverse; }
+/* Avatar always sits on the left — direction is conveyed by accent tint. */
 
 .thread-reply-msg__bubble {
   position: relative;
@@ -2687,13 +2752,18 @@ body {
   min-width: 0;
   max-width: 72%;
   background: var(--color-surface);
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   padding: 6px 10px;
+  box-shadow: var(--shadow-sm);
 }
 
-.thread-reply-msg--out .thread-reply-msg__bubble { border-top-right-radius: 4px; }
-.thread-reply-msg--in  .thread-reply-msg__bubble { border-top-left-radius:  4px; }
+.thread-reply-msg--out .thread-reply-msg__bubble {
+  background: var(--color-accent-soft);
+  border-color: var(--color-drop-border);
+}
+/* Both directions point at the avatar on the left. */
+.thread-reply-msg__bubble { border-top-left-radius: 4px; }
 
 .thread-reply-msg__head {
   display: flex;
@@ -2729,10 +2799,25 @@ body {
   white-space: pre-wrap;
 }
 
-.thread-reply-msg__delete {
+/* Actions row pinned to the bubble's top edge — holds the Reply (always) and
+   Delete (own replies only) buttons. Dimmed at rest so the bubble stays
+   visually quiet, but always visible so the Reply affordance is reachable
+   without hovering (especially on touch devices, and on the user's own
+   bubble where the cursor often isn't parked nearby). */
+.thread-reply-msg__actions {
   position: absolute;
   top: 4px;
   right: 4px;
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0.55;
+  transition: opacity 0.15s var(--ease);
+}
+.thread-reply-msg__bubble:hover .thread-reply-msg__actions,
+.thread-reply-msg__bubble:focus-within .thread-reply-msg__actions { opacity: 1; }
+
+.thread-reply-msg__reply-btn,
+.thread-reply-msg__delete {
   width: 18px;
   height: 18px;
   padding: 0;
@@ -2741,17 +2826,96 @@ body {
   color: var(--color-text-muted);
   border-radius: var(--radius-xs);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s var(--ease), color 0.15s var(--ease), background 0.15s var(--ease);
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
-.thread-reply-msg--out .thread-reply-msg__delete { right: auto; left: 4px; }
-.thread-reply-msg__bubble:hover .thread-reply-msg__delete { opacity: 1; }
-.thread-reply-msg__delete:hover { color: var(--color-error); background: var(--color-error-soft); }
+.thread-reply-msg__reply-btn:hover { color: var(--color-accent); background: var(--color-accent-soft); }
+.thread-reply-msg__delete:hover    { color: var(--color-error);  background: var(--color-error-soft); }
 
-/* Brief flash when scrolling to a parent share via the ↪ reference link. */
+/* When this reply is itself quoting another reply, the ref pill shifts to
+   look like a quote: stronger left accent, tinted background, author name
+   emphasised by the colon. */
+.thread-reply-msg__ref--reply {
+  background: var(--color-bg);
+  border-left: 2px solid var(--color-accent);
+  color: var(--color-text-secondary);
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+}
+.thread-reply-msg__ref--reply:hover {
+  background: var(--color-accent-soft);
+  color: var(--color-text);
+}
+
+/* Quote chip rendered above inline replies (under the share card) when the
+   inline reply quotes another reply. Tiny, muted, clickable to jump. */
+.thread-msg__inline-reply-quote {
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+.thread-msg__inline-reply-quote:hover { color: var(--color-accent); }
+
+/* Inline composer attached below a reply bubble — appears when the user
+   clicks the Reply button on that bubble. Indented slightly so it visually
+   belongs to the reply above. Outgoing-direction rows mirror the indent. */
+.thread-reply-msg__reply-form {
+  margin: 4px 0 0 36px;     /* 28px avatar + 8px gap */
+  padding: 6px 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+  animation: fadeIn 0.15s var(--ease);
+}
+
+.thread-reply-msg__reply-quote {
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  margin-bottom: 4px;
+}
+.thread-reply-msg__reply-quote strong {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.thread-reply-msg__reply-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.thread-reply-msg__reply-body {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  padding: 4px 8px;
+}
+.thread-reply-msg__reply-cancel {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.thread-reply-msg__reply-cancel:hover { color: var(--color-text); background: var(--color-bg); }
+.thread-reply-msg__reply-send { flex-shrink: 0; }
+
+/* Brief flash when scrolling to a parent share or parent reply via a ↪
+   reference link. The reply flash uses an outline since the bubble already
+   has a subtle box-shadow at rest. */
 .thread-msg--flash .thread-msg__card {
   animation: msgFlash 1.4s var(--ease);
 }
@@ -2759,6 +2923,9 @@ body {
   0%   { box-shadow: 0 0 0 0 var(--color-accent-soft); }
   20%  { box-shadow: 0 0 0 4px var(--color-accent-soft); }
   100% { box-shadow: 0 0 0 0 var(--color-accent-soft); }
+}
+.thread-reply-msg--flash .thread-reply-msg__bubble {
+  animation: msgFlash 1.4s var(--ease);
 }
 
 /* Composer pinned to the bottom of the thread view, just above the nav.
