@@ -32,3 +32,6 @@ yarn-error.log*
 # Not part of the public extension repo
 server/
 promo/
+
+# Local planning notes
+tania-chat-upgrade-prompts.md
