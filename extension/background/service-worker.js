@@ -43,7 +43,7 @@ async function setSession(session) {
 async function clearSession() {
   await chrome.storage.local.remove([
     'accessToken', 'refreshToken', 'expiresAt', 'user',
-    'lastNotifiedAt', 'lastGroupNotifiedAt',
+    'lastNotifiedAt', 'lastInviteNotifiedAt',
   ]);
 }
 
@@ -247,10 +247,13 @@ async function pollUnreadCount() {
       clearBadge();
       return;
     }
-    const unread = await rpc('unread_share_count');
-    setBadge(unread || 0);
-    if ((unread || 0) > 0) await notifyNewShares();
-    await notifyNewGroupInvites();
+    const [shareUnread, msgUnread] = await Promise.all([
+      rpc('unread_share_count'),
+      rpc('unread_message_count'),
+    ]);
+    setBadge((shareUnread || 0) + (msgUnread || 0));
+    if ((shareUnread || 0) > 0) await notifyNewShares();
+    await notifyNewGroupInvitations();
   } catch (err) {
     if (err.message === 'Session expired') {
       clearBadge();
@@ -306,37 +309,39 @@ async function notifyNewShares() {
   }
 }
 
-async function notifyNewGroupInvites() {
-  const { notificationsEnabled = true, lastGroupNotifiedAt } =
-    await chrome.storage.local.get(['notificationsEnabled', 'lastGroupNotifiedAt']);
+// Group invitations are accept-first now (v2 flow): you aren't a member until
+// you accept, so we notify on a fresh *pending invite* rather than membership.
+async function notifyNewGroupInvitations() {
+  const { notificationsEnabled = true, lastInviteNotifiedAt } =
+    await chrome.storage.local.get(['notificationsEnabled', 'lastInviteNotifiedAt']);
   if (notificationsEnabled === false) return;
 
-  const rows = await rpc('list_new_group_memberships', { after: lastGroupNotifiedAt || null });
+  const rows = await rpc('list_new_group_invitations', { after: lastInviteNotifiedAt || null });
   if (!rows || rows.length === 0) return;
 
-  if (!lastGroupNotifiedAt) {
-    const newest = rows.reduce((a, b) => (a.joined_at > b.joined_at ? a : b)).joined_at;
-    await chrome.storage.local.set({ lastGroupNotifiedAt: newest });
+  if (!lastInviteNotifiedAt) {
+    const newest = rows.reduce((a, b) => (a.created_at > b.created_at ? a : b)).created_at;
+    await chrome.storage.local.set({ lastInviteNotifiedAt: newest });
     return;
   }
 
   const fresh = rows
-    .filter((r) => r.joined_at > lastGroupNotifiedAt)
-    .sort((a, b) => (a.joined_at < b.joined_at ? -1 : 1));
+    .filter((r) => r.created_at > lastInviteNotifiedAt)
+    .sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
 
   for (const r of fresh) {
-    chrome.notifications.create(`tania-group-${r.group_id}`, {
+    chrome.notifications.create(`tania-invite-${r.invitation_id}`, {
       type:     'basic',
       iconUrl:  chrome.runtime.getURL('icons/icon-128.png'),
-      title:    'Added to a group',
-      message:  `You were added to "${r.group_name}".`,
+      title:    'Group invitation',
+      message:  `${r.inviter_username} invited you to "${r.group_name}".`,
       priority: 0,
     });
   }
 
   if (fresh.length > 0) {
-    const newest = fresh[fresh.length - 1].joined_at;
-    await chrome.storage.local.set({ lastGroupNotifiedAt: newest });
+    const newest = fresh[fresh.length - 1].created_at;
+    await chrome.storage.local.set({ lastInviteNotifiedAt: newest });
   }
 }
 

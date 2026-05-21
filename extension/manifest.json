@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Tania",
   "description": "Share with your circle.",
-  "version": "0.2.2",
+  "version": "0.3.0",
 
   "permissions": [
     "sidePanel",
@@ -13,7 +13,8 @@
   ],
 
   "host_permissions": [
-    "https://*.supabase.co/*"
+    "https://*.supabase.co/*",
+    "wss://*.supabase.co/*"
   ],
 
   "background": {

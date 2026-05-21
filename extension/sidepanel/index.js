@@ -58,8 +58,13 @@ function initCompactToggle() {
 applyCompact();
 
 import { api, getAuth, setAuth, clearAuth } from '../shared/api.js';
-import { extractUrl, isValidUrl, buildLinkPreview } from './lib/link-utils.js';
+import { isValidUrl, buildLinkPreview } from './lib/link-utils.js';
 import { AVATAR_PRESETS, avatarHtml } from './lib/avatars.js';
+import {
+  subscribeToConversation,
+  unsubscribeFromConversation,
+  sendTypingIndicator,
+} from '../shared/realtime.js';
 
 // --- State ---
 
@@ -67,6 +72,7 @@ let currentUser = null;
 let conversationsCache = [];
 let conversationsPollingId = null;
 let currentThread = null;
+let currentThreadItems = []; // last-rendered feed items (shares + messages) for optimistic inserts
 let pendingLink = null;
 let unreadCount = 0;
 let pendingRequestCount = 0;
@@ -111,8 +117,6 @@ const $viewSettings  = document.getElementById('view-settings');
 
 // --- DOM: Inbox (conversations) ---
 
-const $dropZone           = document.getElementById('drop-zone');
-const $dropText           = $dropZone.querySelector('.drop-zone__text');
 const $conversationsLoading = document.getElementById('conversations-loading');
 const $conversationsList  = document.getElementById('conversations-list');
 const $conversationsSearch = document.getElementById('conversations-search');
@@ -122,11 +126,16 @@ const $conversationsSearch = document.getElementById('conversations-search');
 const $threadBack       = document.getElementById('thread-back');
 const $threadHeader     = document.getElementById('thread-header-info');
 const $threadMessages   = document.getElementById('thread-messages');
-const $threadShareToggle = document.getElementById('thread-share-toggle');
-const $threadShareForm  = document.getElementById('thread-share-form');
-const $threadUrlInput   = document.getElementById('thread-url-input');
-const $threadNoteInput  = document.getElementById('thread-note-input');
-const $threadShareBtn   = document.getElementById('thread-share-btn');
+const $typingIndicator  = document.getElementById('typing-indicator');
+
+// --- DOM: Thread composer (message input) ---
+
+const $composer         = document.getElementById('thread-composer');
+const $composerInput    = document.getElementById('composer-input');
+const $composerSend     = document.getElementById('composer-send');
+const $composerAttach   = document.getElementById('composer-attach');
+const $composerFile     = document.getElementById('composer-file');
+const $composerAttachment = document.getElementById('composer-attachment');
 
 // --- DOM: Friends ---
 
@@ -172,6 +181,11 @@ const $startConvPicker   = document.getElementById('start-conv-picker');
 const $startConvClose    = document.getElementById('start-conv-close');
 const $startConvSearch   = document.getElementById('start-conv-search');
 const $startConvFriends  = document.getElementById('start-conv-friends');
+const $startConvFooter    = document.getElementById('start-conv-footer');
+const $startConvMessage   = document.getElementById('start-conv-message');
+const $startConvGroupName = document.getElementById('start-conv-group-name');
+const $startConvSeparate  = document.getElementById('start-conv-separate');
+const $startConvGo        = document.getElementById('start-conv-go');
 
 // ============================================================
 //  SESSION EXPIRY — auto-logout when JWT expires
@@ -362,12 +376,48 @@ function showLogin() {
 function showApp() {
   $loginView.hidden = true;
   $appView.hidden = false;
-  $settingsUsername.textContent = currentUser.username;
+  renderSettingsUsername();
   $settingsEmail.textContent = currentUser.email;
+  loadCreatorIds();
   renderSettingsAvatar();
   switchView('inbox');
   startPolling();
   refreshPendingCount();
+}
+
+// ---- Creator badge ---------------------------------------------------------
+// Ids of "Creator" accounts (profiles.is_creator). Loaded once on app open;
+// used to badge those users wherever their name appears.
+let creatorIds = new Set();
+
+function loadCreatorIds() {
+  api.getCreatorIds()
+    .then(({ ids }) => {
+      creatorIds = new Set(ids);
+      // Re-render anything already on screen so badges appear without a reload.
+      if (currentView === 'inbox' && !currentThread) renderConversationsList();
+      renderSettingsUsername();
+    })
+    .catch(() => {});
+}
+
+function renderSettingsUsername() {
+  if (currentUser && $settingsUsername) {
+    $settingsUsername.innerHTML = escapeHtml(currentUser.username) + creatorBadge(currentUser.id);
+  }
+}
+
+function isCreator(id) {
+  return !!id && creatorIds.has(id);
+}
+
+// Small inline verified "bluetick" badge to drop in right after a username.
+function creatorBadge(id) {
+  return isCreator(id)
+    ? ' <span class="creator-badge" title="Creator" aria-label="Verified Creator" role="img">'
+      + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+      + '</span>'
+    : '';
 }
 
 async function logout() {
@@ -378,6 +428,8 @@ async function logout() {
   conversationsAtEnd = false;
   conversationsLoading = false;
   currentThread = null;
+  unsubscribeFromConversation();
+  hideTyping();
   resetViewState();
 
   await showLoader(2000);
@@ -545,7 +597,7 @@ if ($settingsClearHistory) {
         currentThread = null;
         $viewThread.hidden = true;
         $viewInbox.hidden = false;
-        closeThreadShareForm();
+        resetComposer();
       }
       refreshUnreadCount();
       if (currentView === 'inbox') loadConversations();
@@ -608,9 +660,20 @@ function switchView(name) {
   // Always exit the thread view when switching tabs
   $viewThread.hidden = true;
   currentThread = null;
+  unsubscribeFromConversation();
+  hideTyping();
 
   for (const [key, el] of Object.entries(views)) {
     el.hidden = key !== name;
+  }
+
+  // Retrigger the enter animation so tab switches crossfade/slide in (rather
+  // than appearing instantly). Reflow between remove/add restarts it.
+  const active = views[name];
+  if (active) {
+    active.classList.remove('view-content--enter');
+    void active.offsetWidth;
+    active.classList.add('view-content--enter');
   }
 
   navButtons.forEach((btn) => {
@@ -751,6 +814,10 @@ async function loadConversations({ reset = true } = {}) {
     });
     hideError();
 
+    // We're online and have the inbox — mark incoming messages delivered so
+    // senders see "Delivered" before the thread is opened. Fire-and-forget.
+    if (reset) api.markAllDelivered().catch(() => {});
+
     if (reset) conversationsCache = [];
     conversationsCache.push(...conversations);
 
@@ -834,7 +901,9 @@ function renderConversationRow(c) {
   const avatar = c.kind === 'peer'
     ? avatarHtml(c.peer.username, c.peer.avatarKey, 'md', c.peer.avatarUrl)
     : groupAvatarHtml(c.group, 'md');
-  const name = c.kind === 'peer' ? escapeHtml(c.peer.username) : escapeHtml(c.group.name);
+  const name = c.kind === 'peer'
+    ? escapeHtml(c.peer.username) + creatorBadge(c.peer.id)
+    : escapeHtml(c.group.name);
   const groupTag = c.kind === 'group' ? '<span class="conv-row__tag">Group</span>' : '';
   const youPrefix = c.lastSenderId && currentUser && c.lastSenderId === currentUser.id
     ? '<span class="conv-row__you">You: </span>' : '';
@@ -866,21 +935,101 @@ async function openConversation(conv) {
   currentThread = conv;
   $viewInbox.hidden = true;
   $viewThread.hidden = false;
-  closeThreadShareForm();
+  resetComposer();
+  hideTyping();
   renderThreadHeader(conv);
   $threadMessages.innerHTML = '<div class="feed__loading"><div class="spinner"></div><span>Loading...</span></div>';
 
+  subscribeThreadRealtime(conv); // fire-and-forget; safe to await elsewhere
+  await loadThread(conv);
+}
+
+// Fetch + render the current thread without touching the realtime subscription
+// (so a live message can refresh the view without churning the channel).
+async function loadThread(conv) {
   const opts = conv.kind === 'peer'
     ? { peerId: conv.peer.id }
     : { groupId: conv.group.id };
 
   try {
-    const { messages } = await api.getConversationThread(opts);
-    renderThreadMessages(messages);
-    api.markConversationRead(opts).then(() => refreshUnreadCount()).catch(() => {});
+    const { items } = await api.getConversationFeed(opts);
+    if (currentThread !== conv) return; // navigated away mid-fetch
+    renderThreadMessages(items);
+    // Mark both legacy shares and chat messages as read.
+    Promise.all([
+      api.markConversationRead(opts),
+      api.markMessagesRead(opts),
+    ]).then(() => refreshUnreadCount()).catch(() => {});
   } catch (err) {
-    $threadMessages.innerHTML = `<p class="replies__error">${escapeHtml(err.message)}</p>`;
+    if (currentThread === conv) {
+      $threadMessages.innerHTML = `<p class="replies__error">${escapeHtml(err.message)}</p>`;
+    }
   }
+}
+
+// ---- Realtime: live messages + typing indicator -------------------------
+
+let typingHideTimer = null;
+let typingBroadcastThrottle = 0;
+let receiptReloadTimer = null;
+
+async function subscribeThreadRealtime(conv) {
+  let conversationId;
+  try {
+    conversationId = conv.kind === 'group'
+      ? conv.group.id
+      : await api.getPeerConversationId(conv.peer.id);
+  } catch {
+    return; // no realtime if we can't resolve the channel id; polling still covers it
+  }
+  if (currentThread !== conv) return; // navigated away while resolving
+
+  await subscribeToConversation(conversationId, {
+    onMessage: (row) => {
+      // A new/edited message in the open thread — reload to surface it. Skip
+      // our own inserts (loadThread already ran after we sent).
+      if (currentThread === conv && row && row.sender_id !== currentUser?.id) {
+        loadThread(conv);
+      }
+    },
+    onReceipt: () => {
+      // A recipient flipped delivered/read on one of our messages. Debounced
+      // reload so a burst of receipts triggers a single refresh.
+      if (currentThread !== conv) return;
+      clearTimeout(receiptReloadTimer);
+      receiptReloadTimer = setTimeout(() => {
+        if (currentThread === conv) loadThread(conv);
+      }, 500);
+    },
+    onTyping: (payload) => {
+      if (currentThread === conv && payload && payload.userId !== currentUser?.id) {
+        showTyping(payload.username);
+      }
+    },
+  });
+}
+
+function showTyping(username) {
+  if (!$typingIndicator) return;
+  $typingIndicator.querySelector('.typing-indicator__text').textContent =
+    username ? `${username} is typing…` : 'typing…';
+  $typingIndicator.hidden = false;
+  clearTimeout(typingHideTimer);
+  typingHideTimer = setTimeout(hideTyping, 3000);
+}
+
+function hideTyping() {
+  clearTimeout(typingHideTimer);
+  if ($typingIndicator) $typingIndicator.hidden = true;
+}
+
+// Broadcast that we're typing, throttled to at most once per second.
+function broadcastTyping() {
+  if (!currentThread) return;
+  const now = Date.now();
+  if (now - typingBroadcastThrottle < 1000) return;
+  typingBroadcastThrottle = now;
+  sendTypingIndicator(currentUser?.username || null);
 }
 
 function renderThreadHeader(conv) {
@@ -888,7 +1037,7 @@ function renderThreadHeader(conv) {
     $threadHeader.innerHTML = `
       ${avatarHtml(conv.peer.username, conv.peer.avatarKey, 'md', conv.peer.avatarUrl)}
       <div class="thread-header__text">
-        <h2 class="thread-header__title">${escapeHtml(conv.peer.username)}</h2>
+        <h2 class="thread-header__title">${escapeHtml(conv.peer.username)}${creatorBadge(conv.peer.id)}</h2>
       </div>
     `;
   } else {
@@ -905,31 +1054,143 @@ function renderThreadHeader(conv) {
   }
 }
 
-function renderThreadMessages(messages) {
-  if (!messages || messages.length === 0) {
-    $threadMessages.innerHTML = `<div class="thread-empty"><p>No messages yet — share a link below.</p></div>`;
+function renderThreadMessages(items) {
+  currentThreadItems = items || [];
+  if (!items || items.length === 0) {
+    $threadMessages.innerHTML = `<div class="thread-empty"><p>No messages yet — say hi or share a link below.</p></div>`;
     return;
   }
 
-  // Build a unified chronological event stream: each share is one event, and
-  // each text reply attached to a share is its own event. Replies still show
-  // inline under the parent share card for at-a-glance context, AND appear as
-  // standalone bubbles in the conversation flow at their actual reply time.
+  // Unified chronological event stream. A chat message is one event. A legacy
+  // link-share is one event, plus one event per text reply attached to it
+  // (replies show inline under the share card AND as standalone bubbles).
   const events = [];
-  for (const m of messages) {
-    events.push({ type: 'share', at: m.sharedAt, share: m });
-    for (const r of (m.replies || [])) {
-      events.push({ type: 'reply', at: r.createdAt, reply: r, parentShare: m });
+  for (const it of items) {
+    if (it.kind === 'message') {
+      events.push({ type: 'message', at: it.createdAt, message: it });
+    } else {
+      events.push({ type: 'share', at: it.sharedAt, share: it });
+      for (const r of (it.replies || [])) {
+        events.push({ type: 'reply', at: r.createdAt, reply: r, parentShare: it });
+      }
     }
   }
   events.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
 
   $threadMessages.innerHTML = '';
   for (const e of events) {
-    if (e.type === 'share') $threadMessages.appendChild(renderThreadMessage(e.share));
-    else                    $threadMessages.appendChild(renderThreadReplyMessage(e.reply, e.parentShare));
+    if (e.type === 'message')      $threadMessages.appendChild(renderChatMessage(e.message));
+    else if (e.type === 'share')   $threadMessages.appendChild(renderThreadMessage(e.share));
+    else                           $threadMessages.appendChild(renderThreadReplyMessage(e.reply, e.parentShare));
   }
   requestAnimationFrame(() => { $threadMessages.scrollTop = $threadMessages.scrollHeight; });
+}
+
+// Render a chat message bubble: text / link / image / document, with edit +
+// delete affordances on the user's own messages and delivery/read status.
+function renderChatMessage(m) {
+  const wrapper = document.createElement('div');
+  const mine = m.direction === 'out';
+  wrapper.className = `chat-msg chat-msg--${m.direction}`;
+  wrapper.dataset.messageId = m.id;
+  wrapper.id = `message-${m.id}`;
+
+  const time = timeAgo(m.createdAt);
+  const senderAvatar = avatarHtml(m.sender.username, m.sender.avatarKey, 'sm', m.sender.avatarUrl);
+
+  let bodyHtml;
+  if (m.deleted) {
+    bodyHtml = `<p class="chat-msg__deleted">message deleted</p>`;
+  } else if (m.messageType === 'image') {
+    bodyHtml = `
+      <img class="chat-msg__image" src="${escapeAttr(m.url)}" alt="${escapeAttr(m.fileName || 'image')}" data-lightbox="${escapeAttr(m.url)}" loading="lazy">
+      ${m.content ? `<p class="chat-msg__text">${linkifyText(m.content)}</p>` : ''}
+    `;
+  } else if (m.messageType === 'document') {
+    bodyHtml = `
+      <a class="chat-msg__doc" href="${escapeAttr(m.url)}" target="_blank" rel="noopener" download>
+        <svg class="chat-msg__doc-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <span class="chat-msg__doc-meta">
+          <span class="chat-msg__doc-name">${escapeHtml(m.fileName || 'Document')}</span>
+          ${m.fileSize ? `<span class="chat-msg__doc-size">${formatFileSize(m.fileSize)}</span>` : ''}
+        </span>
+      </a>
+      ${m.content ? `<p class="chat-msg__text">${linkifyText(m.content)}</p>` : ''}
+    `;
+  } else if (m.messageType === 'link') {
+    const preview = buildLinkPreview(m.url);
+    const title = m.ogTitle || m.title || truncateUrl(m.url, 50);
+    bodyHtml = `
+      ${m.content ? `<p class="chat-msg__text">${linkifyText(m.content)}</p>` : ''}
+      <a class="chat-msg__link-card" href="${escapeAttr(m.url)}" target="_blank" rel="noopener">
+        ${m.ogImage ? `<img class="chat-msg__link-img" src="${escapeAttr(m.ogImage)}" alt="" loading="lazy">` : ''}
+        <span class="chat-msg__link-body">
+          ${buildPlatformBadge(preview)}
+          <span class="chat-msg__link-title">${escapeHtml(title)}</span>
+          ${m.ogDescription ? `<span class="chat-msg__link-desc">${escapeHtml(m.ogDescription)}</span>` : ''}
+          <span class="chat-msg__link-url">${escapeHtml(truncateUrl(m.url, 44))}</span>
+        </span>
+      </a>
+    `;
+  } else {
+    bodyHtml = `<p class="chat-msg__text">${linkifyText(m.content || '')}</p>`;
+  }
+
+  const editable = mine && !m.deleted &&
+    (Date.now() - new Date(m.createdAt).getTime() < 24 * 3600 * 1000);
+  const actionsHtml = !m.deleted ? `
+    <div class="chat-msg__actions">
+      <button class="chat-msg__action" data-save-message="${escapeAttr(m.id)}" title="Save to your archive">Save</button>
+      ${editable && m.messageType === 'text' ? `<button class="chat-msg__action" data-edit-message="${escapeAttr(m.id)}" title="Edit">Edit</button>` : ''}
+      ${mine ? `<button class="chat-msg__action" data-delete-message="${escapeAttr(m.id)}" title="Delete">Delete</button>` : ''}
+    </div>` : '';
+
+  const statusHtml = (mine && !m.deleted) ? `<span class="chat-msg__status">${receiptLabel(m)}</span>` : '';
+  const editedHtml = m.edited && !m.deleted ? ` <span class="chat-msg__edited">(edited)</span>` : '';
+
+  wrapper.innerHTML = `
+    <div class="chat-msg__row">
+      ${mine ? '' : senderAvatar}
+      <div class="chat-msg__bubble">
+        ${mine ? '' : `<span class="chat-msg__sender">${escapeHtml(m.sender.username)}${creatorBadge(m.sender.id)}</span>`}
+        ${bodyHtml}
+        <span class="chat-msg__meta">
+          <span class="chat-msg__time">${time}${editedHtml}</span>
+          ${statusHtml}
+        </span>
+        ${actionsHtml}
+      </div>
+    </div>
+  `;
+  return wrapper;
+}
+
+// "Sent" / "Delivered" / "Read" for peer; "Seen by N" for groups.
+function receiptLabel(m) {
+  if (!m.recipientCount) return 'Sent';
+  if (m.recipientCount === 1) {
+    if (m.readCount > 0)      return 'Read';
+    if (m.deliveredCount > 0) return 'Delivered';
+    return 'Sent';
+  }
+  if (m.readCount > 0) return `Seen by ${m.readCount}`;
+  return 'Sent';
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// Turn bare URLs in plain text into clickable links (escaping the rest).
+function linkifyText(text) {
+  const parts = String(text).split(/(https?:\/\/[^\s]+)/g);
+  return parts.map((p) =>
+    /^https?:\/\//.test(p)
+      ? `<a href="${escapeAttr(p)}" target="_blank" rel="noopener">${escapeHtml(truncateUrl(p, 50))}</a>`
+      : escapeHtml(p)
+  ).join('');
 }
 
 function renderThreadMessage(m) {
@@ -948,7 +1209,7 @@ function renderThreadMessage(m) {
       ${senderAvatar}
       <div class="thread-msg__card">
         <div class="thread-msg__head">
-          <span class="thread-msg__sender">${escapeHtml(m.sender.username)}</span>
+          <span class="thread-msg__sender">${escapeHtml(m.sender.username)}${creatorBadge(m.sender.id)}</span>
           <span class="thread-msg__time">${time}</span>
         </div>
         <div class="thread-msg__compact">
@@ -987,7 +1248,7 @@ function renderInlineReply(r) {
   return `
     <div class="thread-msg__inline-reply${isMine ? ' thread-msg__inline-reply--mine' : ''}" data-reply-id="${escapeAttr(r.id)}">
       ${quotedLine}
-      <span class="thread-msg__inline-reply-author">${escapeHtml(r.author)}</span>
+      <span class="thread-msg__inline-reply-author">${escapeHtml(r.author)}${creatorBadge(r.authorId)}</span>
       <span class="thread-msg__inline-reply-body">${escapeHtml(r.body)}</span>
       ${isMine ? `<button class="thread-msg__inline-reply-delete" data-reply-delete="${escapeAttr(r.id)}" title="Delete">&times;</button>` : ''}
     </div>
@@ -1033,10 +1294,11 @@ function renderThreadReplyMessage(r, parentShare) {
     ? `<form class="thread-reply-msg__reply-form" data-share-id="${escapeAttr(parentShare.id)}" data-parent-reply-id="${escapeAttr(r.id)}" hidden>
          <div class="thread-reply-msg__reply-quote">Replying to <strong>${escapeHtml(r.author)}</strong></div>
          <div class="thread-reply-msg__reply-row">
-           <input class="input thread-reply-msg__reply-body" type="text" placeholder="Reply to ${escapeAttr(r.author)}..." maxlength="1000" autocomplete="off">
-           <button type="button" class="thread-reply-msg__reply-cancel" data-reply-cancel title="Cancel">&times;</button>
+           <input class="input thread-reply-msg__reply-body" type="text" placeholder="Reply to ${escapeAttr(r.author)}..." maxlength="1000" autocomplete="off" aria-label="Reply to ${escapeAttr(r.author)}">
+           <button type="button" class="thread-reply-msg__reply-cancel" data-reply-cancel title="Cancel" aria-label="Cancel reply">&times;</button>
            <button type="submit" class="btn btn--primary btn--sm thread-reply-msg__reply-send" hidden>Send</button>
          </div>
+         <p class="thread-reply-msg__reply-error" role="alert" hidden></p>
        </form>`
     : '';
 
@@ -1045,7 +1307,7 @@ function renderThreadReplyMessage(r, parentShare) {
       ${authorAvatar}
       <div class="thread-reply-msg__bubble">
         <div class="thread-reply-msg__head">
-          <span class="thread-reply-msg__author">${escapeHtml(r.author)}</span>
+          <span class="thread-reply-msg__author">${escapeHtml(r.author)}${creatorBadge(r.authorId)}</span>
           <span class="thread-reply-msg__time">${time}</span>
         </div>
         ${refHtml}
@@ -1061,6 +1323,69 @@ function renderThreadReplyMessage(r, parentShare) {
     ${composerHtml}
   `;
   return wrapper;
+}
+
+// Insert a freshly posted reply into the DOM without reloading the thread
+// (keeps scroll position; no jarring full re-render). Appends the standalone
+// bubble at the end of the flow and echoes it inline under the parent share.
+function insertReplyOptimistically(reply, shareId) {
+  if (currentUser) {
+    reply.author    = reply.author   || currentUser.username;
+    reply.authorId  = reply.authorId || currentUser.id;
+    reply.avatarKey = currentUser.avatarKey;
+    reply.avatarUrl = currentUser.avatarUrl;
+  }
+  const parentShare = currentThreadItems.find((it) => it.kind === 'share' && it.id === shareId);
+  if (parentShare) {
+    parentShare.replies = parentShare.replies || [];
+    parentShare.replies.push(reply);
+  }
+
+  const bubble = renderThreadReplyMessage(reply, parentShare || { id: shareId });
+  bubble.classList.add('thread-reply-msg--entering');
+  $threadMessages.appendChild(bubble);
+
+  const inlineHost = $threadMessages.querySelector(`.thread-msg__inline-replies[data-share-id="${shareId}"]`);
+  if (inlineHost) inlineHost.insertAdjacentHTML('beforeend', renderInlineReply(reply));
+
+  requestAnimationFrame(() => {
+    bubble.classList.remove('thread-reply-msg--entering');
+    bubble.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    bubble.classList.add('thread-reply-msg--flash');
+    setTimeout(() => bubble.classList.remove('thread-reply-msg--flash'), 1500);
+  });
+}
+
+function openReplyForm(form) {
+  form.hidden = false;
+  const input = form.querySelector('.thread-reply-msg__reply-body');
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (input) {
+      input.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      setTimeout(() => input.focus({ preventScroll: true }), 60);
+    }
+  }));
+}
+
+// Animated collapse, then reset the composer. Optionally restore focus to the
+// control that opened it (keyboard users land back where they were).
+function closeReplyForm(form, restoreFocusEl) {
+  if (!form || form.hidden) {
+    if (restoreFocusEl) restoreFocusEl.focus();
+    return;
+  }
+  form.classList.add('thread-reply-msg__reply-form--closing');
+  setTimeout(() => {
+    form.hidden = true;
+    form.classList.remove('thread-reply-msg__reply-form--closing');
+    const input = form.querySelector('.thread-reply-msg__reply-body');
+    const send  = form.querySelector('.thread-reply-msg__reply-send');
+    const err   = form.querySelector('.thread-reply-msg__reply-error');
+    if (input) input.value = '';
+    if (send)  send.hidden = true;
+    if (err) { err.hidden = true; err.textContent = ''; }
+  }, 160);
+  if (restoreFocusEl) restoreFocusEl.focus();
 }
 
 $threadMessages.addEventListener('click', async (e) => {
@@ -1087,9 +1412,18 @@ $threadMessages.addEventListener('click', async (e) => {
     const id = delBtn.dataset.replyDelete;
     try {
       await api.deleteReply(id);
-      // Remove every copy of this reply — inline note under the parent
+      // Fade + collapse out every copy — the inline note under the parent
       // share AND the standalone bubble in the conversation flow.
-      $threadMessages.querySelectorAll(`[data-reply-id="${id}"]`).forEach((el) => el.remove());
+      $threadMessages.querySelectorAll(`[data-reply-id="${id}"]`).forEach((el) => {
+        el.classList.add('reply-removing');
+        setTimeout(() => el.remove(), 240);
+      });
+      // Keep the in-memory model in sync for later optimistic inserts.
+      for (const it of currentThreadItems) {
+        if (it.kind === 'share' && Array.isArray(it.replies)) {
+          it.replies = it.replies.filter((rp) => rp.id !== id);
+        }
+      }
     } catch (err) {
       showToast(err.message, 'error');
     }
@@ -1122,19 +1456,15 @@ $threadMessages.addEventListener('click', async (e) => {
     return;
   }
 
-  // Cancel button inside the reply-to-reply composer — collapse it back.
+  // Cancel button inside the reply-to-reply composer — collapse it back and
+  // return focus to the bubble's Reply button.
   const cancelBtn = e.target.closest('[data-reply-cancel]');
   if (cancelBtn) {
     e.preventDefault();
     e.stopPropagation();
     const form = cancelBtn.closest('.thread-reply-msg__reply-form');
-    if (form) {
-      form.hidden = true;
-      const input = form.querySelector('.thread-reply-msg__reply-body');
-      const send  = form.querySelector('.thread-reply-msg__reply-send');
-      if (input) input.value = '';
-      if (send)  send.hidden = true;
-    }
+    const replyBtn = cancelBtn.closest('.thread-reply-msg')?.querySelector('.thread-reply-msg__reply-btn');
+    closeReplyForm(form, replyBtn);
     return;
   }
 
@@ -1150,23 +1480,12 @@ $threadMessages.addEventListener('click', async (e) => {
     if (!form) return;
     const willOpen = form.hidden;
     $threadMessages.querySelectorAll('.thread-reply-msg__reply-form:not([hidden])').forEach((other) => {
-      if (other !== form) {
-        other.hidden = true;
-        const i = other.querySelector('.thread-reply-msg__reply-body');
-        const s = other.querySelector('.thread-reply-msg__reply-send');
-        if (i) i.value = '';
-        if (s) s.hidden = true;
-      }
+      if (other !== form) closeReplyForm(other);
     });
-    form.hidden = !willOpen;
     if (willOpen) {
-      const input = form.querySelector('.thread-reply-msg__reply-body');
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        if (input) {
-          input.scrollIntoView({ block: 'center', behavior: 'smooth' });
-          setTimeout(() => input.focus({ preventScroll: true }), 60);
-        }
-      }));
+      openReplyForm(form);
+    } else {
+      closeReplyForm(form, replyOnReplyBtn);
     }
     return;
   }
@@ -1179,12 +1498,6 @@ $threadMessages.addEventListener('click', async (e) => {
   if (card) {
     card.classList.toggle('thread-msg--expanded');
     if (card.classList.contains('thread-msg--expanded')) {
-      // If the share composer is open with nothing typed, close it — the user
-      // is switching to inline-reply mode, and an open composer would overlap
-      // the reply input on the last message.
-      if (!$threadShareForm.hidden && !$threadUrlInput.value.trim()) {
-        closeThreadShareForm();
-      }
       const input = card.querySelector('.thread-msg__reply-body');
       // Double rAF so the expansion's added height is in the layout before we
       // scroll; block:'nearest' lets the browser pick the closest scrollable
@@ -1233,23 +1546,30 @@ $threadMessages.addEventListener('submit', async (e) => {
     if (!currentThread) return;
     const bodyInput = replyToReplyForm.querySelector('.thread-reply-msg__reply-body');
     const sendBtn   = replyToReplyForm.querySelector('.thread-reply-msg__reply-send');
+    const errEl     = replyToReplyForm.querySelector('.thread-reply-msg__reply-error');
     const text = bodyInput.value.trim();
     if (!text) return;
     sendBtn.disabled = true;
+    sendBtn.textContent = 'Sending…';
+    if (errEl) errEl.hidden = true;
     try {
-      await api.postReply(
+      const { reply } = await api.postReply(
         replyToReplyForm.dataset.shareId,
         text,
         replyToReplyForm.dataset.parentReplyId,
       );
+      replyToReplyForm.hidden = true;        // close instantly (the new bubble takes focus)
       bodyInput.value = '';
       sendBtn.hidden  = true;
-      replyToReplyForm.hidden = true;
-      openConversation(currentThread);
+      insertReplyOptimistically(reply, replyToReplyForm.dataset.shareId);
+      showToast('Reply posted', 'success');  // role=status → announced to SR
     } catch (err) {
-      showToast(err.message, 'error');
+      // Keep the composer open + text intact; show the error inline.
+      if (errEl) { errEl.textContent = err.message; errEl.hidden = false; }
+      else showToast(err.message, 'error');
     } finally {
       sendBtn.disabled = false;
+      sendBtn.textContent = 'Send';
     }
     return;
   }
@@ -1287,16 +1607,17 @@ $threadMessages.addEventListener('submit', async (e) => {
       showToast('Shared', 'success');
       openConversation(currentThread); // reload to surface the new card
     } else {
-      // Plain text → posted as a reply attached to the parent share. Reload
-      // the conversation so the reply appears both as an inline note under
-      // the parent card AND as its own bubble in the chronological flow.
+      // Plain text → reply on the parent share. Insert optimistically so the
+      // reply appears inline under the card AND as a bubble in the flow,
+      // without a jarring full reload that loses scroll position.
       const parentShareId = form.dataset.shareId;
-      await api.postReply(parentShareId, text);
+      const { reply } = await api.postReply(parentShareId, text);
       bodyInput.value = '';
       noteInput.value = '';
       noteInput.hidden = true;
       sendBtn.hidden = true;
-      openConversation(currentThread);
+      insertReplyOptimistically(reply, parentShareId);
+      showToast('Reply posted', 'success');
     }
   } catch (err) {
     showToast(err.message, 'error');
@@ -1305,85 +1626,243 @@ $threadMessages.addEventListener('submit', async (e) => {
   }
 });
 
+// Esc closes the reply-on-reply composer (Enter sends via native form submit).
+$threadMessages.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const form = e.target.closest('.thread-reply-msg__reply-form');
+  if (!form) return;
+  e.preventDefault();
+  const replyBtn = form.closest('.thread-reply-msg')?.querySelector('.thread-reply-msg__reply-btn');
+  closeReplyForm(form, replyBtn);
+});
+
 $threadBack.addEventListener('click', () => {
   $viewThread.hidden = true;
   $viewInbox.hidden = false;
   currentThread = null;
-  closeThreadShareForm();
+  unsubscribeFromConversation();
+  hideTyping();
+  resetComposer();
   loadConversations();
 });
 
-// In-chat share composer — hidden by default, toggled by the + button in the
-// thread header. Note field + Send button reveal progressively after a valid
-// URL is typed (mirrors the Saved-tab pattern). Submits into currentThread.
+// ============================================================
+//  THREAD MESSAGE COMPOSER (text / link / image / document)
+// ============================================================
+// Always-visible bottom composer. Typing a URL sends a link message; an
+// attached file sends an image/document message; otherwise plain text. The
+// same input doubles as an inline editor for the user's own text messages.
 
-function closeThreadShareForm() {
-  $threadShareForm.hidden = true;
-  $threadUrlInput.value = '';
-  $threadNoteInput.value = '';
-  $threadNoteInput.hidden = true;
-  $threadShareBtn.hidden = true;
-}
+let composerAttachment = null; // { messageType, filePath, url, fileName, fileSize, mimeType }
+let composerEditingId  = null; // message id being edited, or null
 
-function refreshThreadShareFormState() {
-  const url = $threadUrlInput.value.trim();
-  const valid = isValidUrl(url);
-  $threadNoteInput.hidden = !valid;
-  $threadShareBtn.hidden = !valid;
-  if (!valid) $threadNoteInput.value = '';
-}
-
-$threadShareToggle.addEventListener('click', () => {
-  if ($threadShareForm.hidden) {
-    $threadShareForm.hidden = false;
-    setTimeout(() => $threadUrlInput.focus(), 30);
-  } else {
-    closeThreadShareForm();
+function resetComposer() {
+  composerAttachment = null;
+  composerEditingId  = null;
+  if ($composerInput) {
+    $composerInput.value = '';
+    $composerInput.style.height = '';
   }
-});
+  if ($composerAttachment) {
+    $composerAttachment.hidden = true;
+    $composerAttachment.innerHTML = '';
+  }
+  refreshComposerState();
+}
 
-$threadUrlInput.addEventListener('input', refreshThreadShareFormState);
+function refreshComposerState() {
+  if (!$composerSend) return;
+  const hasText = $composerInput.value.trim().length > 0;
+  $composerSend.disabled = !hasText && !composerAttachment;
+}
 
-$threadShareForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  if (!currentThread) return;
-  const url = $threadUrlInput.value.trim();
-  if (!isValidUrl(url)) {
-    showToast('Enter a valid URL', 'error');
+function autoGrowComposer() {
+  $composerInput.style.height = 'auto';
+  $composerInput.style.height = `${Math.min($composerInput.scrollHeight, 120)}px`;
+}
+
+function renderComposerAttachment() {
+  if (!composerAttachment) {
+    $composerAttachment.hidden = true;
+    $composerAttachment.innerHTML = '';
     return;
   }
-  $threadShareBtn.disabled = true;
-  try {
-    const preview = buildLinkPreview(url);
-    await api.share(
-      url,
-      currentThread.kind === 'peer' ? [currentThread.peer.id] : null,
-      {
-        note:     $threadNoteInput.value.trim() || undefined,
-        platform: preview.platform?.id || undefined,
-        title:    preview.sublabel || undefined,
-        groupId:  currentThread.kind === 'group' ? currentThread.group.id : undefined,
-      }
-    );
-    closeThreadShareForm();
-    showToast('Shared', 'success');
-    openConversation(currentThread); // reload thread to show the new message
-  } catch (err) {
-    showToast(err.message, 'error');
-  } finally {
-    $threadShareBtn.disabled = false;
+  const a = composerAttachment;
+  const thumb = a.messageType === 'image'
+    ? `<img class="composer__attachment-thumb" src="${escapeAttr(a.url)}" alt="">`
+    : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+  $composerAttachment.hidden = false;
+  $composerAttachment.innerHTML = `
+    ${thumb}
+    <span class="composer__attachment-name">${escapeHtml(a.fileName)}</span>
+    <button type="button" class="composer__attachment-remove" title="Remove">&times;</button>
+  `;
+  $composerAttachment.querySelector('.composer__attachment-remove').addEventListener('click', () => {
+    composerAttachment = null;
+    renderComposerAttachment();
+    refreshComposerState();
+  });
+}
+
+$composerInput.addEventListener('input', () => {
+  autoGrowComposer();
+  refreshComposerState();
+  broadcastTyping();
+});
+
+// Enter sends; Shift+Enter inserts a newline.
+$composerInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    $composer.requestSubmit();
   }
 });
+
+$composerAttach.addEventListener('click', () => $composerFile.click());
+
+$composerFile.addEventListener('change', async () => {
+  const file = $composerFile.files && $composerFile.files[0];
+  $composerFile.value = '';
+  if (!file) return;
+  $composerAttachment.hidden = false;
+  $composerAttachment.innerHTML = `<span class="composer__attachment-name">Uploading ${escapeHtml(file.name)}…</span>`;
+  refreshComposerState();
+  try {
+    composerAttachment = await api.uploadMessageFile(file);
+    renderComposerAttachment();
+  } catch (err) {
+    composerAttachment = null;
+    renderComposerAttachment();
+    showToast(err.message, 'error');
+  }
+  refreshComposerState();
+});
+
+$composer.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!currentThread) return;
+  const text = $composerInput.value.trim();
+  const attachment = composerAttachment;
+  if (!text && !attachment) return;
+
+  // Editing an existing text message?
+  if (composerEditingId) {
+    const id = composerEditingId;
+    $composerSend.disabled = true;
+    try {
+      await api.editMessage(id, text);
+      resetComposer();
+      loadThread(currentThread);
+    } catch (err) {
+      showToast(err.message, 'error');
+      $composerSend.disabled = false;
+    }
+    return;
+  }
+
+  const target = currentThread.kind === 'peer'
+    ? { peerId: currentThread.peer.id }
+    : { groupId: currentThread.group.id };
+
+  $composerSend.disabled = true;
+  try {
+    if (attachment) {
+      await api.sendMessage({
+        ...target,
+        content:     text || undefined,
+        messageType: attachment.messageType,
+        url:         attachment.url,
+        filePath:    attachment.filePath,
+        fileName:    attachment.fileName,
+        fileSize:    attachment.fileSize,
+        mimeType:    attachment.mimeType,
+      });
+    } else if (isValidUrl(text)) {
+      const preview = buildLinkPreview(text);
+      await api.sendMessage({
+        ...target,
+        messageType: 'link',
+        url:         text,
+        platform:    preview.platform?.id || undefined,
+        title:       preview.sublabel || undefined,
+      });
+    } else {
+      await api.sendMessage({ ...target, content: text, messageType: 'text' });
+    }
+    resetComposer();
+    loadThread(currentThread);
+  } catch (err) {
+    showToast(err.message, 'error');
+    refreshComposerState();
+  }
+});
+
+// Edit / delete a chat message, or open an image lightbox (delegated).
+$threadMessages.addEventListener('click', (e) => {
+  const editBtn = e.target.closest('[data-edit-message]');
+  if (editBtn) {
+    const id = editBtn.getAttribute('data-edit-message');
+    const bubble = document.getElementById(`message-${id}`);
+    const textEl = bubble && bubble.querySelector('.chat-msg__text');
+    composerEditingId = id;
+    $composerInput.value = textEl ? textEl.textContent : '';
+    $composerInput.focus();
+    autoGrowComposer();
+    refreshComposerState();
+    return;
+  }
+  const delBtn = e.target.closest('[data-delete-message]');
+  if (delBtn) {
+    api.deleteMessage(delBtn.getAttribute('data-delete-message'))
+      .then(() => loadThread(currentThread))
+      .catch((err) => showToast(err.message, 'error'));
+    return;
+  }
+  const saveBtn = e.target.closest('[data-save-message]');
+  if (saveBtn) {
+    api.saveMessageToArchive(saveBtn.getAttribute('data-save-message'))
+      .then(() => showToast('Saved to your archive', 'success'))
+      .catch((err) => showToast(err.message, 'error'));
+    return;
+  }
+  const img = e.target.closest('[data-lightbox]');
+  if (img) openLightbox(img.getAttribute('data-lightbox'));
+});
+
+function openLightbox(src) {
+  const overlay = document.createElement('div');
+  overlay.className = 'lightbox';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', 'Image preview');
+  overlay.innerHTML = `
+    <button class="lightbox__close" type="button" aria-label="Close preview">&times;</button>
+    <img class="lightbox__img" src="${escapeAttr(src)}" alt="">
+  `;
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  // Backdrop-click only — clicking the image itself shouldn't dismiss it.
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('.lightbox__close').addEventListener('click', close);
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(overlay);
+  overlay.querySelector('.lightbox__close').focus();
+}
 
 // --- Polling ---
 
 function startPolling() {
   stopPolling();
+  // Realtime now drives the open conversation; this poll is just a fallback
+  // for the inbox list / badge / pending counts, so 60s is plenty.
   conversationsPollingId = setInterval(() => {
     if (currentView === 'inbox' && !currentThread) loadConversations();
     refreshUnreadCount();
     refreshPendingCount();
-  }, 30_000);
+  }, 60_000);
 }
 
 function stopPolling() {
@@ -1413,7 +1892,7 @@ function friendRowHtml(f) {
     <div class="friend-row__info">
       ${avatarHtml(f.user.username, f.user.avatarKey, 'sm', f.user.avatarUrl)}
       <div class="friend-row__text">
-        <span class="friend-row__name">${escapeHtml(f.user.username)}</span>
+        <span class="friend-row__name">${escapeHtml(f.user.username)}${creatorBadge(f.user.id)}</span>
         <span class="friend-row__since">Friends since ${new Date(f.since).toLocaleDateString()}</span>
         ${mutualLabel}
       </div>
@@ -1524,7 +2003,7 @@ async function loadFriends() {
         li.innerHTML = `
           <div class="friend-row__info">
             ${avatarHtml(req.user.username, req.user.avatarKey, 'sm', req.user.avatarUrl)}
-            <span class="friend-row__name">${escapeHtml(req.user.username)}</span>
+            <span class="friend-row__name">${escapeHtml(req.user.username)}${creatorBadge(req.user.id)}</span>
           </div>
           <div class="friend-row__actions">
             <button class="btn btn--sm btn--primary" data-accept="${escapeAttr(req.id)}">Accept</button>
@@ -1544,7 +2023,7 @@ async function loadFriends() {
         li.innerHTML = `
           <div class="friend-row__info">
             ${avatarHtml(req.user.username, req.user.avatarKey, 'sm', req.user.avatarUrl)}
-            <span class="friend-row__name">${escapeHtml(req.user.username)}</span>
+            <span class="friend-row__name">${escapeHtml(req.user.username)}${creatorBadge(req.user.id)}</span>
           </div>
           <span class="friend-row__status">Pending</span>
         `;
@@ -1647,7 +2126,7 @@ function renderAddFriendResults(users, query) {
     li.innerHTML = `
       ${avatarHtml(u.username, u.avatarKey, 'sm', u.avatarUrl)}
       <div class="invite-search-row__info">
-        <span class="search-username">${highlightMatch(u.username, query)}</span>
+        <span class="search-username">${highlightMatch(u.username, query)}${creatorBadge(u.id)}</span>
         ${mutualLabel}
       </div>
       ${actionHtml}
@@ -1703,42 +2182,12 @@ $pendingList.addEventListener('click', async (e) => {
 });
 
 // ============================================================
-//  DROP ZONE → FRIEND PICKER → SHARE
+//  EXTERNAL LINK CAPTURE → FRIEND PICKER → SHARE
 // ============================================================
-
-let dragCounter = 0;
-
-$dropZone.addEventListener('dragenter', (e) => {
-  e.preventDefault();
-  dragCounter++;
-  $dropZone.classList.add('drop-zone--active');
-});
-
-$dropZone.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'copy';
-});
-
-$dropZone.addEventListener('dragleave', () => {
-  dragCounter--;
-  if (dragCounter === 0) $dropZone.classList.remove('drop-zone--active');
-});
-
-$dropZone.addEventListener('drop', (e) => {
-  e.preventDefault();
-  dragCounter = 0;
-  $dropZone.classList.remove('drop-zone--active');
-
-  const url = extractUrl(e.dataTransfer);
-  if (!url) {
-    showToast('Not a valid URL', 'error');
-    rejectAnimation();
-    return;
-  }
-
-  openPicker(url);
-  successAnimation();
-});
+// The inbox drop zone is gone; the primary way to share a link is now the
+// in-conversation composer. These two entry points remain for links that
+// originate *outside* a conversation — pasting a URL into the panel, or the
+// content-script "share this page" action — and route to the friend picker.
 
 document.addEventListener('paste', (e) => {
   if (e.target.closest('input, textarea')) return;
@@ -1802,7 +2251,7 @@ async function openPicker(url) {
       item.innerHTML = `
         <input type="checkbox" class="picker__checkbox" value="${escapeAttr(f.user.id)}">
         ${avatarHtml(f.user.username, f.user.avatarKey, 'sm', f.user.avatarUrl)}
-        <span class="picker__name">${escapeHtml(f.user.username)}</span>
+        <span class="picker__name">${escapeHtml(f.user.username)}${creatorBadge(f.user.id)}</span>
       `;
       $pickerFriends.appendChild(item);
     });
@@ -1891,11 +2340,14 @@ if ($pickerSearch) {
 // ============================================================
 
 let startConvFriendsCache = [];
+const startConvSelected = new Set(); // friend ids selected for the new chat/group
 
 async function openStartConvPicker() {
   if (!$startConvPicker) return;
   $startConvPicker.hidden = false;
   $startConvSearch.value = '';
+  startConvSelected.clear();
+  updateStartConvFooter();
   $startConvFriends.innerHTML =
     '<div class="feed__loading"><div class="spinner"></div><span>Loading friends...</span></div>';
 
@@ -1903,8 +2355,12 @@ async function openStartConvPicker() {
     const { friends } = await api.getFriends();
     startConvFriendsCache = friends;
     if (friends.length === 0) {
-      $startConvFriends.innerHTML =
-        '<p class="picker__empty">No friends yet. Add some on the Friends tab!</p>';
+      $startConvFriends.innerHTML = `
+        <div class="start-conv__empty">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+          <p class="start-conv__empty-title">No friends yet</p>
+          <span class="start-conv__empty-hint">Add friends on the Friends tab to start chatting.</span>
+        </div>`;
       return;
     }
     renderStartConvFriends('');
@@ -1921,29 +2377,90 @@ function renderStartConvFriends(query) {
     : startConvFriendsCache;
 
   if (matches.length === 0) {
-    $startConvFriends.innerHTML = `<p class="picker__empty">No friends match "${escapeHtml(q)}"</p>`;
+    $startConvFriends.innerHTML = `<p class="picker__empty">No friends match “${escapeHtml(q)}”</p>`;
     return;
   }
 
   $startConvFriends.innerHTML = '';
   matches.forEach((f) => {
+    const selected = startConvSelected.has(f.user.id);
     const row = document.createElement('button');
     row.type = 'button';
-    row.className = 'start-conv__friend';
+    row.className = `start-conv__friend${selected ? ' start-conv__friend--selected' : ''}`;
     row.dataset.friendId = f.user.id;
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', selected ? 'true' : 'false');
     row.innerHTML = `
-      ${avatarHtml(f.user.username, f.user.avatarKey, 'sm', f.user.avatarUrl)}
-      <span class="picker__name">${escapeHtml(f.user.username)}</span>
+      ${avatarHtml(f.user.username, f.user.avatarKey, 'md', f.user.avatarUrl)}
+      <span class="picker__name">${escapeHtml(f.user.username)}${creatorBadge(f.user.id)}</span>
+      <span class="start-conv__check" aria-hidden="true">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </span>
     `;
-    row.addEventListener('click', () => startConversationWith(f.user));
+    row.addEventListener('click', () => toggleStartConvSelection(f.user.id, row));
     $startConvFriends.appendChild(row);
   });
+}
+
+function toggleStartConvSelection(id, row) {
+  if (startConvSelected.has(id)) startConvSelected.delete(id);
+  else startConvSelected.add(id);
+  const on = startConvSelected.has(id);
+  row.classList.toggle('start-conv__friend--selected', on);
+  row.setAttribute('aria-selected', on ? 'true' : 'false');
+  updateStartConvFooter();
+}
+
+function startConvSelectedUsers() {
+  return [...startConvSelected]
+    .map((id) => startConvFriendsCache.find((f) => f.user.id === id)?.user)
+    .filter(Boolean);
+}
+
+// Sensible default name from the picked friends (editable), e.g. "Ana, Bo +2".
+function defaultGroupName() {
+  const names = startConvSelectedUsers().map((u) => u.username);
+  if (names.length === 0) return '';
+  const base = names.length <= 3
+    ? names.join(', ')
+    : `${names.slice(0, 2).join(', ')} +${names.length - 2}`;
+  return base.slice(0, 40);
+}
+
+function updateStartConvFooter() {
+  if (!$startConvFooter) return;
+  const n = startConvSelected.size;
+  const isGroup = n >= 2;
+  $startConvFooter.hidden = n === 0;
+  $startConvMessage.hidden = n === 0;
+  $startConvGroupName.hidden = !isGroup;
+  $startConvSeparate.hidden = !isGroup;
+
+  $startConvGo.disabled = n === 0;
+  $startConvGo.textContent = isGroup ? `Create group · ${n}` : 'Start chat';
+
+  // "Send separately" broadcasts the typed message to each friend as a 1:1, so
+  // it needs a message.
+  const hasMsg = $startConvMessage.value.trim().length > 0;
+  $startConvSeparate.disabled = !hasMsg;
+  $startConvSeparate.textContent = `Send separately · ${n}`;
+
+  if (isGroup) {
+    if (!$startConvGroupName.value.trim()) $startConvGroupName.value = defaultGroupName();
+  } else {
+    $startConvGroupName.value = '';
+  }
 }
 
 function closeStartConvPicker() {
   if (!$startConvPicker) return;
   $startConvPicker.hidden = true;
   startConvFriendsCache = [];
+  startConvSelected.clear();
+  if ($startConvMessage)   $startConvMessage.value = '';
+  if ($startConvGroupName) $startConvGroupName.value = '';
+  if ($startConvSeparate)  $startConvSeparate.hidden = true;
+  if ($startConvFooter)    $startConvFooter.hidden = true;
 }
 
 function startConversationWith(user) {
@@ -1960,6 +2477,89 @@ function startConversationWith(user) {
   });
 }
 
+// A typed URL becomes a link message; anything else is plain text — mirrors the
+// in-thread composer.
+function startConvMessagePayload(text) {
+  if (isValidUrl(text)) {
+    const preview = buildLinkPreview(text);
+    return { messageType: 'link', url: text, platform: preview.platform?.id || undefined, title: preview.sublabel || undefined };
+  }
+  return { content: text, messageType: 'text' };
+}
+
+// Primary action. One friend → open the 1:1 (sending an optional first
+// message). Two or more → create a group, invite them, optionally post the
+// message into it, then open the group thread.
+async function commitStartConv() {
+  const users = startConvSelectedUsers();
+  if (users.length === 0) return;
+  const msg = $startConvMessage.value.trim();
+
+  if (users.length === 1) {
+    const peer = users[0];
+    $startConvGo.disabled = true;
+    try {
+      if (msg) await api.sendMessage({ peerId: peer.id, ...startConvMessagePayload(msg) });
+      startConversationWith(peer);
+    } catch (err) {
+      showToast(err.message, 'error');
+      $startConvGo.disabled = false;
+    }
+    return;
+  }
+
+  const name = ($startConvGroupName.value.trim() || defaultGroupName() || 'New group').slice(0, 40);
+  const prevText = $startConvGo.textContent;
+  $startConvGo.disabled = true;
+  $startConvGo.textContent = 'Creating…';
+  try {
+    const { group } = await api.createGroup(name);
+    await api.inviteToGroup(group.id, users.map((u) => u.id));
+    if (msg) await api.sendMessage({ groupId: group.id, ...startConvMessagePayload(msg) });
+    closeStartConvPicker();
+    openConversation({
+      kind:         'group',
+      peer:         null,
+      group:        { id: group.id, name: group.name || name, color: group.color || '#6366f1', avatarKey: null, avatarUrl: null },
+      lastShareId:  null,
+      lastSnippet:  '',
+      lastSenderId: null,
+      lastAt:       null,
+      unreadCount:  0,
+    });
+    showToast(`Group “${name}” created — invites sent`, 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+    $startConvGo.disabled = false;
+    $startConvGo.textContent = prevText;
+  }
+}
+
+// Deliver the typed message to each selected friend as its own 1:1 — no group.
+// Lands back on the inbox where the new conversations surface.
+async function sendSeparately() {
+  const users = startConvSelectedUsers();
+  const msg = $startConvMessage.value.trim();
+  if (users.length < 2 || !msg) return;
+  const payload = startConvMessagePayload(msg);
+  const prev = $startConvSeparate.textContent;
+  $startConvSeparate.disabled = true;
+  $startConvGo.disabled = true;
+  $startConvSeparate.textContent = 'Sending…';
+  try {
+    await Promise.all(users.map((u) => api.sendMessage({ peerId: u.id, ...payload })));
+    closeStartConvPicker();
+    showToast(`Sent to ${users.length} friends`, 'success');
+    if (currentView === 'inbox') loadConversations();
+    refreshUnreadCount();
+  } catch (err) {
+    showToast(err.message, 'error');
+    $startConvSeparate.disabled = false;
+    $startConvSeparate.textContent = prev;
+    $startConvGo.disabled = false;
+  }
+}
+
 if ($startConvBtn)   $startConvBtn.addEventListener('click', openStartConvPicker);
 if ($startConvClose) $startConvClose.addEventListener('click', closeStartConvPicker);
 if ($startConvPicker) {
@@ -1970,6 +2570,9 @@ if ($startConvPicker) {
 if ($startConvSearch) {
   $startConvSearch.addEventListener('input', () => renderStartConvFriends($startConvSearch.value));
 }
+if ($startConvMessage)  $startConvMessage.addEventListener('input', updateStartConvFooter);
+if ($startConvSeparate) $startConvSeparate.addEventListener('click', sendSeparately);
+if ($startConvGo)       $startConvGo.addEventListener('click', commitStartConv);
 
 $pickerSend.addEventListener('click', async () => {
   if (!pendingLink) return;
@@ -2003,28 +2606,6 @@ $pickerSend.addEventListener('click', async () => {
 });
 
 // ============================================================
-//  DROP ZONE ANIMATIONS
-// ============================================================
-
-function successAnimation() {
-  $dropZone.classList.add('drop-zone--success');
-  $dropText.textContent = 'Link captured!';
-  setTimeout(() => {
-    $dropZone.classList.remove('drop-zone--success');
-    $dropText.textContent = 'Drag a link here to share';
-  }, 1200);
-}
-
-function rejectAnimation() {
-  $dropZone.classList.add('drop-zone--error');
-  $dropText.textContent = 'Not a valid link';
-  setTimeout(() => {
-    $dropZone.classList.remove('drop-zone--error');
-    $dropText.textContent = 'Drag a link here to share';
-  }, 1500);
-}
-
-// ============================================================
 //  UTILITIES
 // ============================================================
 
@@ -2044,6 +2625,7 @@ function truncate(str, max) {
 }
 
 function truncateUrl(url, max) {
+  if (!url) return '';
   try {
     const u = new URL(url);
     const display = u.hostname.replace('www.', '') + u.pathname + u.search + u.hash;
@@ -2194,6 +2776,12 @@ const $groupEditorError = document.getElementById('group-editor-error');
 const $groupEditorClose = document.getElementById('group-editor-close');
 const $groupEditorSave  = document.getElementById('group-editor-save');
 const $groupEditorDelete = document.getElementById('group-editor-delete');
+const $groupEditorPreviewAvatar = document.getElementById('group-editor-preview-avatar');
+const $groupEditorPreviewName   = document.getElementById('group-editor-preview-name');
+const $groupEditorMemberCount   = document.getElementById('group-editor-member-count');
+const $groupEditorDeleteConfirm = document.getElementById('group-editor-delete-confirm');
+const $groupEditorDeleteCancel  = document.getElementById('group-editor-delete-cancel');
+const $groupEditorDeleteYes     = document.getElementById('group-editor-delete-yes');
 
 const GROUP_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4', '#a855f7', '#ec4899', '#64748b'];
 
@@ -2307,6 +2895,25 @@ function renderGroupsList() {
   });
 }
 
+// Live preview of how the group will look (avatar honours the selected
+// emoji/photo + colour; name reflects the input). Reuses groupAvatarHtml so
+// it matches the real chat UI exactly.
+function updateGroupEditorPreview() {
+  if (!$groupEditorPreviewAvatar) return;
+  const name = $groupEditorName.value.trim();
+  $groupEditorPreviewAvatar.innerHTML = groupAvatarHtml(
+    { name: name || 'Group', color: groupEditorColor, avatarKey: groupEditorAvatarKey, avatarUrl: groupEditorAvatarUrl },
+    'lg'
+  );
+  $groupEditorPreviewName.textContent = name || (editingGroup ? editingGroup.name : 'New group');
+}
+
+function updateGroupEditorMemberCount() {
+  if (!$groupEditorMemberCount) return;
+  const n = groupEditorMembers.size;
+  $groupEditorMemberCount.textContent = n ? ` · ${n}` : '';
+}
+
 function renderGroupColorSwatches() {
   $groupEditorColors.innerHTML = '';
   GROUP_COLORS.forEach((color) => {
@@ -2315,9 +2922,11 @@ function renderGroupColorSwatches() {
     btn.className = 'circle-color-swatch';
     if (color === groupEditorColor) btn.classList.add('circle-color-swatch--active');
     btn.style.background = color;
+    btn.setAttribute('aria-label', `Colour ${color}`);
     btn.addEventListener('click', () => {
       groupEditorColor = color;
       renderGroupColorSwatches();
+      updateGroupEditorPreview();
     });
     $groupEditorColors.appendChild(btn);
   });
@@ -2345,6 +2954,7 @@ function renderGroupAvatarSwatches() {
   none.addEventListener('click', () => {
     groupEditorAvatarKey = null;
     renderGroupAvatarSwatches();
+    updateGroupEditorPreview();
   });
   $groupEditorAvatars.appendChild(none);
 
@@ -2358,6 +2968,7 @@ function renderGroupAvatarSwatches() {
     btn.addEventListener('click', () => {
       groupEditorAvatarKey = a.key;
       renderGroupAvatarSwatches();
+      updateGroupEditorPreview();
     });
     $groupEditorAvatars.appendChild(btn);
   });
@@ -2375,6 +2986,7 @@ if ($groupEditorAvatarFile) {
       editingGroup.avatarUrl = avatarUrl;
       editingGroup.avatarKey = null;
       renderGroupAvatarSwatches();
+      updateGroupEditorPreview();
       showToast('Photo uploaded', 'success');
     } catch (err) {
       showToast(err.message, 'error');
@@ -2393,10 +3005,14 @@ async function openGroupEditor(group) {
 
   $groupEditorTitle.textContent = group ? 'Edit group' : 'New group';
   $groupEditorName.value = group?.name || '';
+  $groupEditorName.classList.remove('input--invalid');
   $groupEditorError.hidden = true;
   $groupEditorDelete.hidden = !group;
+  hideDeleteConfirm();
   renderGroupColorSwatches();
   renderGroupAvatarSwatches();
+  updateGroupEditorPreview();
+  updateGroupEditorMemberCount();
 
   $groupEditor.hidden = false;
   $groupEditorName.focus();
@@ -2415,7 +3031,12 @@ async function openGroupEditor(group) {
     ]);
     groupEditorFriendsById = new Map(friends.map((f) => [f.user.id, f.user]));
     if (friends.length === 0) {
-      $groupEditorMembers.innerHTML = '<p class="picker__empty">Add some friends first.</p>';
+      $groupEditorMembers.innerHTML = `
+        <div class="start-conv__empty">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>
+          <p class="start-conv__empty-title">No friends yet</p>
+          <span class="start-conv__empty-hint">Add friends on the Friends tab, then come back to build a group.</span>
+        </div>`;
       return;
     }
     const pendingByInvitee = new Map(pending.map((inv) => [inv.invitee.id, inv.id]));
@@ -2425,6 +3046,7 @@ async function openGroupEditor(group) {
         buildGroupEditorFriendRow(f.user, pendingByInvitee.get(f.user.id) || null)
       );
     });
+    updateGroupEditorMemberCount();
   } catch (err) {
     $groupEditorMembers.innerHTML = `<p class="picker__empty">${escapeHtml(err.message)}</p>`;
   }
@@ -2442,7 +3064,7 @@ function buildGroupEditorFriendRow(user, pendingInvitationId) {
     row.dataset.userId = user.id;
     row.innerHTML = `
       ${avatarHtml(user.username, user.avatarKey, 'sm', user.avatarUrl)}
-      <span class="picker__name">${escapeHtml(user.username)}</span>
+      <span class="picker__name">${escapeHtml(user.username)}${creatorBadge(user.id)}</span>
       <span class="picker__pending-pill">Pending</span>
       <button type="button" class="picker__cancel-invite"
               data-cancel-invitation="${escapeAttr(pendingInvitationId)}"
@@ -2458,13 +3080,16 @@ function buildGroupEditorFriendRow(user, pendingInvitationId) {
   item.innerHTML = `
     <input type="checkbox" class="picker__checkbox" value="${escapeAttr(user.id)}" ${checked}>
     ${avatarHtml(user.username, user.avatarKey, 'sm', user.avatarUrl)}
-    <span class="picker__name">${escapeHtml(user.username)}</span>
+    <span class="picker__name">${escapeHtml(user.username)}${creatorBadge(user.id)}</span>
   `;
   const cb = item.querySelector('input');
   cb.addEventListener('change', () => {
     if (cb.checked) groupEditorMembers.add(user.id);
     else            groupEditorMembers.delete(user.id);
+    item.classList.toggle('picker__friend--checked', cb.checked);
+    updateGroupEditorMemberCount();
   });
+  if (cb.checked) item.classList.add('picker__friend--checked');
   return item;
 }
 
@@ -2473,10 +3098,56 @@ function closeGroupEditor() {
   editingGroup = null;
   groupEditorMembers.clear();
   groupEditorFriendsById.clear();
+  hideDeleteConfirm();
+}
+
+// Disable/enable every control in the editor (used during save).
+function setGroupEditorBusy(busy) {
+  [$groupEditorName, $groupEditorMemberSearch, $groupEditorClose, $groupEditorDelete]
+    .forEach((el) => { if (el) el.disabled = busy; });
+  $groupEditor.querySelectorAll('.group-avatar-swatch, .circle-color-swatch, .picker__checkbox, .picker__cancel-invite')
+    .forEach((el) => { el.disabled = busy; });
+  $groupEditor.classList.toggle('group-editor--busy', busy);
+}
+
+function showDeleteConfirm() {
+  if (!$groupEditorDeleteConfirm) return;
+  $groupEditorDeleteConfirm.hidden = false;
+  $groupEditorDelete.hidden = true;
+  $groupEditorSave.hidden = true;
+  $groupEditorDeleteYes.focus();
+}
+
+function hideDeleteConfirm() {
+  if (!$groupEditorDeleteConfirm) return;
+  $groupEditorDeleteConfirm.hidden = true;
+  $groupEditorSave.hidden = false;
+  $groupEditorDelete.hidden = !editingGroup;
 }
 
 $newGroupBtn.addEventListener('click', () => openGroupEditor(null));
 $groupEditorClose.addEventListener('click', closeGroupEditor);
+
+// Live preview + clear the invalid state as the user types; Enter saves.
+if ($groupEditorName) {
+  $groupEditorName.addEventListener('input', () => {
+    $groupEditorName.classList.remove('input--invalid');
+    if (!$groupEditorError.hidden) $groupEditorError.hidden = true;
+    updateGroupEditorPreview();
+  });
+  $groupEditorName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); $groupEditorSave.click(); }
+  });
+}
+
+// Esc closes the editor (unless a delete confirmation is showing — then it
+// just dismisses that).
+$groupEditor.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  e.preventDefault();
+  if ($groupEditorDeleteConfirm && !$groupEditorDeleteConfirm.hidden) hideDeleteConfirm();
+  else closeGroupEditor();
+});
 
 if ($groupEditorMemberSearch) {
   $groupEditorMemberSearch.addEventListener('input', () => {
@@ -2513,6 +3184,7 @@ $groupEditorMembers.addEventListener('click', async (e) => {
     } else if (row) {
       row.remove();
     }
+    updateGroupEditorMemberCount();
   } catch (err) {
     showToast(err.message, 'error');
     cancelBtn.disabled = false;
@@ -2524,13 +3196,18 @@ $groupEditor.addEventListener('click', (e) => { if (e.target === $groupEditor) c
 $groupEditorSave.addEventListener('click', async () => {
   const name = $groupEditorName.value.trim();
   if (!name) {
-    $groupEditorError.textContent = 'Name required';
+    $groupEditorError.textContent = 'Please name the group';
     $groupEditorError.hidden = false;
+    $groupEditorName.classList.add('input--invalid');
+    $groupEditorName.focus();
     return;
   }
   $groupEditorError.hidden = true;
+  $groupEditorName.classList.remove('input--invalid');
+  setGroupEditorBusy(true);
   $groupEditorSave.disabled = true;
-  $groupEditorSave.textContent = 'Saving...';
+  $groupEditorSave.classList.add('btn--loading');
+  $groupEditorSave.textContent = 'Saving';
 
   try {
     let groupId;
@@ -2568,26 +3245,37 @@ $groupEditorSave.addEventListener('click', async () => {
     $groupEditorError.textContent = err.message;
     $groupEditorError.hidden = false;
   } finally {
+    setGroupEditorBusy(false);
     $groupEditorSave.disabled = false;
+    $groupEditorSave.classList.remove('btn--loading');
     $groupEditorSave.textContent = 'Save';
   }
 });
 
-$groupEditorDelete.addEventListener('click', async () => {
-  if (!editingGroup) return;
-  if (!confirm(`Delete group "${editingGroup.name}"? All conversation history stays in members' inboxes but the group disappears.`)) return;
-  $groupEditorDelete.disabled = true;
-  try {
-    await api.deleteGroup(editingGroup.id);
-    showToast('Group deleted', 'success');
-    closeGroupEditor();
-    loadGroups();
-  } catch (err) {
-    showToast(err.message, 'error');
-  } finally {
-    $groupEditorDelete.disabled = false;
-  }
+// Delete now uses an inline, in-overlay confirmation (no native confirm()).
+$groupEditorDelete.addEventListener('click', () => {
+  if (editingGroup) showDeleteConfirm();
 });
+if ($groupEditorDeleteCancel) $groupEditorDeleteCancel.addEventListener('click', hideDeleteConfirm);
+if ($groupEditorDeleteYes) {
+  $groupEditorDeleteYes.addEventListener('click', async () => {
+    if (!editingGroup) return;
+    $groupEditorDeleteYes.disabled = true;
+    $groupEditorDeleteYes.classList.add('btn--loading');
+    $groupEditorDeleteYes.textContent = 'Deleting';
+    try {
+      await api.deleteGroup(editingGroup.id);
+      showToast('Group deleted', 'success');
+      closeGroupEditor();
+      loadGroups();
+    } catch (err) {
+      showToast(err.message, 'error');
+      $groupEditorDeleteYes.disabled = false;
+      $groupEditorDeleteYes.classList.remove('btn--loading');
+      $groupEditorDeleteYes.textContent = 'Delete';
+    }
+  });
+}
 
 // ============================================================
 //  SAVED VIEW (personal bookmark archive)
@@ -2602,17 +3290,34 @@ const $savedUrlInput  = document.getElementById('saved-url-input');
 const $savedNoteInput = document.getElementById('saved-note-input');
 const $savedAddBtn    = document.getElementById('saved-add-btn');
 const $savedFormError = document.getElementById('saved-form-error');
+const $savedReveal     = document.getElementById('saved-form-reveal');
+const $savedAttach     = document.getElementById('saved-attach');
+const $savedFile       = document.getElementById('saved-file');
+const $savedAttachment = document.getElementById('saved-attachment');
 
 let savedCursor = null;
 let isSavedLoadingMore = false;
 let savedCache = [];
 
+function renderSavedSkeleton() {
+  $savedList.innerHTML = Array.from({ length: 3 }, () => `
+    <li class="saved-card saved-card--skeleton" aria-hidden="true">
+      <div class="saved-card__media skeleton-block"></div>
+      <div class="saved-card__body">
+        <span class="skeleton-line skeleton-line--chip"></span>
+        <span class="skeleton-line skeleton-line--title"></span>
+        <span class="skeleton-line"></span>
+        <span class="skeleton-line skeleton-line--short"></span>
+      </div>
+    </li>`).join('');
+}
+
 async function loadBookmarks(append = false) {
   if (!append) {
-    $savedLoading.hidden = false;
-    $savedList.innerHTML = '';
+    $savedLoading.hidden = true;
     savedCursor = null;
     savedCache = [];
+    renderSavedSkeleton();
   }
 
   try {
@@ -2625,8 +3330,9 @@ async function loadBookmarks(append = false) {
     if (!append) {
       $savedList.innerHTML = `
         <li class="feed__error-state">
+          <svg class="feed__error-icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           <p class="feed__error-text">${escapeHtml(err.message)}</p>
-          <button class="btn btn--ghost" id="saved-retry">Try again</button>
+          <button class="btn btn--ghost btn--sm" id="saved-retry">Try again</button>
         </li>`;
       document.getElementById('saved-retry')?.addEventListener('click', () => loadBookmarks());
     }
@@ -2656,85 +3362,143 @@ function renderSavedList() {
           <path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/>
         </svg>
         <p class="feed__empty-title">Nothing saved yet</p>
-        <p class="feed__empty-text">Save links from your inbox, or paste one above</p>
+        <p class="feed__empty-text">Paste a link or attach a file below — or tap Save on anything in your chats.</p>
       </li>`;
     return;
   }
 
   const matches = q ? savedCache.filter((b) => bookmarkMatchesQuery(b, q)) : savedCache;
   if (matches.length === 0) {
-    const moreHint = savedCursor ? ' Try Load more to search older links.' : '';
+    const moreHint = savedCursor ? ' Try “Load more” to search older items.' : '';
     $savedList.innerHTML = `
       <li class="feed__empty-state">
+        <svg class="feed__empty-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <p class="feed__empty-title">No matches</p>
-        <p class="feed__empty-text">Nothing matched "${escapeHtml(q)}".${moreHint}</p>
+        <p class="feed__empty-text">Nothing matched “${escapeHtml(q)}”.${moreHint}</p>
       </li>`;
     return;
+  }
+  // Reflect the filtered count while searching, for quick orientation.
+  if (q) {
+    const countLi = document.createElement('li');
+    countLi.className = 'saved-results-count';
+    countLi.textContent = `${matches.length} result${matches.length === 1 ? '' : 's'} for “${q}”`;
+    $savedList.appendChild(countLi);
   }
   matches.forEach(renderBookmarkItem);
 }
 
+// SVG icon set for saved cards (consistent 2px round-stroke style).
+const SAVED_ICONS = {
+  image:    '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.6"/><path d="M21 15l-5-5L5 21"/>',
+  document: '<path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/>',
+  clock:    '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  globe:    '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 010 20 15.3 15.3 0 010-20z"/>',
+  download: '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+  trash:    '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 01-2 2H9a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
+};
+const savedIcon = (name, size = 13) =>
+  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SAVED_ICONS[name]}</svg>`;
+
 function renderBookmarkItem(b) {
   const preview = buildLinkPreview(b.url);
+  const isImage = b.messageType === 'image';
+  const isDoc   = b.messageType === 'document';
+  const type    = isImage ? 'image' : isDoc ? 'document' : 'link';
+
   const li = document.createElement('li');
-  li.className = 'preview-card';
+  li.className = `saved-card saved-card--${type}`;
   li.dataset.bookmarkId = b.id;
 
-  const displayTitle = b.ogTitle || b.title;
-  const displayUrl = truncateUrl(b.url, 55);
-  const time = timeAgo(b.savedAt);
+  const displayTitle = b.ogTitle || b.title || (isDoc || isImage ? b.fileName : '') || '';
 
-  const mediaHtml = b.ogImage
-    ? `<a class="preview-card__media" href="${escapeAttr(b.url)}" target="_blank" rel="noopener">
-         <img class="preview-card__image" src="${escapeAttr(b.ogImage)}" alt="" loading="lazy" referrerpolicy="no-referrer">
+  // Banner media: a saved image shows itself (lightbox); a link shows its OG image.
+  let mediaHtml = '';
+  if (isImage && b.url) {
+    mediaHtml = `<div class="saved-card__media"><img class="saved-card__img" src="${escapeAttr(b.url)}" alt="${escapeAttr(b.fileName || 'image')}" loading="lazy" data-lightbox="${escapeAttr(b.url)}"></div>`;
+  } else if (type === 'link' && b.ogImage) {
+    mediaHtml = `<a class="saved-card__media saved-card__media--og" href="${escapeAttr(b.url)}" target="_blank" rel="noopener"><img class="saved-card__img" src="${escapeAttr(b.ogImage)}" alt="" loading="lazy" referrerpolicy="no-referrer"></a>`;
+  }
+
+  // Type chip: platform badge for links, a labelled chip for image/document.
+  const chipHtml = isImage
+    ? `<span class="saved-card__chip">${savedIcon('image')} Image</span>`
+    : isDoc
+      ? `<span class="saved-card__chip">${savedIcon('document')} Document</span>`
+      : buildPlatformBadge(preview);
+
+  // Document download tile (documents only).
+  const docHtml = (isDoc && b.url)
+    ? `<a class="saved-card__doc" href="${escapeAttr(b.url)}" target="_blank" rel="noopener" download>
+         <span class="saved-card__doc-icon">${savedIcon('document', 18)}</span>
+         <span class="saved-card__doc-name">${escapeHtml(b.fileName || 'Document')}</span>
+         <span class="saved-card__doc-dl">${savedIcon('download', 16)}</span>
        </a>`
     : '';
 
+  const urlHtml = (b.url && type === 'link')
+    ? `<a class="saved-card__url" href="${escapeAttr(b.url)}" target="_blank" rel="noopener">${savedIcon('globe', 12)}<span>${escapeHtml(truncateUrl(b.url, 46))}</span></a>`
+    : '';
+
+  const senderHtml = b.sourceSender
+    ? `<span class="saved-card__sender">
+         ${avatarHtml(b.sourceSender.username, b.sourceSender.avatarKey, 'sm', b.sourceSender.avatarUrl)}
+         <span class="saved-card__sender-text">Shared by <b>${escapeHtml(b.sourceSender.username)}</b></span>
+       </span>`
+    : `<span class="saved-card__sender saved-card__sender--self">Saved by you</span>`;
+
   li.innerHTML = `
-    <div class="preview-card__header">
-      ${buildPlatformBadge(preview)}
-      <div class="preview-card__header-actions">
-        <button class="preview-card__icon-btn" title="Remove" data-bookmark-delete="${escapeAttr(b.id)}">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 01-2 2H9a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
-        </button>
-      </div>
-    </div>
+    <button class="saved-card__remove" data-bookmark-delete="${escapeAttr(b.id)}" title="Remove" aria-label="Remove from saved">
+      ${savedIcon('trash', 14)}
+    </button>
     ${mediaHtml}
-    ${displayTitle ? `<p class="preview-card__title">${escapeHtml(displayTitle)}</p>` : ''}
-    ${b.ogDescription ? `<p class="preview-card__og-desc">${escapeHtml(b.ogDescription)}</p>` : ''}
-    ${b.note ? `<p class="preview-card__note">${escapeHtml(b.note)}</p>` : ''}
-    <a class="preview-card__url-link" href="${escapeAttr(b.url)}" target="_blank" rel="noopener">${escapeHtml(displayUrl)}</a>
-    <div class="preview-card__footer">
-      <span class="preview-card__time">Saved ${time}</span>
+    <div class="saved-card__body">
+      <div class="saved-card__chiprow">${chipHtml}</div>
+      ${displayTitle ? `<p class="saved-card__title">${escapeHtml(displayTitle)}</p>` : ''}
+      ${b.ogDescription ? `<p class="saved-card__desc">${escapeHtml(b.ogDescription)}</p>` : ''}
+      ${docHtml}
+      ${b.note ? `<p class="saved-card__note">${escapeHtml(b.note)}</p>` : ''}
+      ${urlHtml}
+    </div>
+    <div class="saved-card__footer">
+      ${senderHtml}
+      <span class="saved-card__time">${savedIcon('clock', 11)} ${escapeHtml(timeAgo(b.savedAt))}</span>
     </div>
   `;
-  const img = li.querySelector('.preview-card__image');
-  if (img) {
-    img.addEventListener('error', () => {
-      img.closest('.preview-card__media')?.remove();
-    });
+
+  // Drop the banner if a link's OG image fails to load.
+  const ogImg = li.querySelector('.saved-card__media--og .saved-card__img');
+  if (ogImg) {
+    ogImg.addEventListener('error', () => ogImg.closest('.saved-card__media')?.remove());
   }
   $savedList.appendChild(li);
 }
 
 $savedList.addEventListener('click', async (e) => {
+  const lightImg = e.target.closest('[data-lightbox]');
+  if (lightImg) {
+    openLightbox(lightImg.getAttribute('data-lightbox'));
+    return;
+  }
   const delBtn = e.target.closest('[data-bookmark-delete]');
   if (!delBtn) return;
   e.preventDefault();
   e.stopPropagation();
   const id = delBtn.dataset.bookmarkDelete;
-  const card = delBtn.closest('.preview-card');
+  const card = delBtn.closest('.saved-card');
   try {
     await api.deleteBookmark(id);
     savedCache = savedCache.filter((b) => b.id !== id);
-    card.style.transition = 'opacity 0.2s, transform 0.2s';
-    card.style.opacity = '0';
-    card.style.transform = 'translateX(20px)';
+    // Collapse the card out: fix its height, then animate to 0 (slide + fade).
+    if (card) {
+      card.style.height = `${card.offsetHeight}px`;
+      requestAnimationFrame(() => card.classList.add('saved-card--removing'));
+    }
     setTimeout(() => {
-      card.remove();
+      card?.remove();
       if (savedCache.length === 0) loadBookmarks();
       else if ($savedList.children.length === 0) renderSavedList();
-    }, 200);
+    }, 280);
     showToast('Removed', 'success');
   } catch (err) {
     showToast(err.message, 'error');
@@ -2754,42 +3518,108 @@ if ($savedSearch) {
 }
 
 // ============================================================
-//  SAVED FORM (progressive: paste URL → reveal note + save)
+//  SAVED FORM (paste a URL — or attach a file — then save)
 // ============================================================
+// Two ways to save: paste a link, or attach an image/document (uploaded to
+// storage, then archived as a file bookmark). Note + Save reveal once either
+// a valid URL is typed or a file is attached.
+
+let savedAttachment = null; // { messageType, filePath, url, fileName, fileSize, mimeType }
 
 function refreshSavedFormState() {
-  const url = $savedUrlInput.value.trim();
-  const valid = isValidUrl(url);
-  $savedNoteInput.hidden = !valid;
-  $savedAddBtn.hidden = !valid;
-  if (!valid) {
-    $savedNoteInput.value = '';
-    $savedFormError.hidden = true;
+  const valid = isValidUrl($savedUrlInput.value.trim());
+  const ready = valid || !!savedAttachment;
+  $savedReveal.hidden = !ready;
+  // While a file is attached, the URL field + attach button step aside.
+  $savedUrlInput.hidden = !!savedAttachment;
+  $savedAttach.hidden = !!savedAttachment;
+  if (!ready) $savedFormError.hidden = true;
+}
+
+function renderSavedAttachment() {
+  if (!savedAttachment) {
+    $savedAttachment.hidden = true;
+    $savedAttachment.innerHTML = '';
+    return;
   }
+  const a = savedAttachment;
+  const thumb = a.messageType === 'image'
+    ? `<img class="saved-form__attachment-thumb" src="${escapeAttr(a.url)}" alt="">`
+    : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+  $savedAttachment.hidden = false;
+  $savedAttachment.innerHTML = `
+    ${thumb}
+    <span class="saved-form__attachment-name">${escapeHtml(a.fileName)}</span>
+    <button type="button" class="saved-form__attachment-remove" title="Remove">&times;</button>
+  `;
+  $savedAttachment.querySelector('.saved-form__attachment-remove').addEventListener('click', () => {
+    savedAttachment = null;
+    renderSavedAttachment();
+    refreshSavedFormState();
+  });
 }
 
 $savedUrlInput.addEventListener('input', refreshSavedFormState);
+$savedAttach.addEventListener('click', () => $savedFile.click());
+
+$savedFile.addEventListener('change', async () => {
+  const file = $savedFile.files && $savedFile.files[0];
+  $savedFile.value = '';
+  if (!file) return;
+  $savedFormError.hidden = true;
+  $savedAttachment.hidden = false;
+  $savedAttachment.innerHTML = `<span class="saved-form__attachment-name">Uploading ${escapeHtml(file.name)}…</span>`;
+  $savedUrlInput.hidden = true;
+  $savedAttach.hidden = true;
+  try {
+    savedAttachment = await api.uploadMessageFile(file);
+    renderSavedAttachment();
+  } catch (err) {
+    savedAttachment = null;
+    renderSavedAttachment();
+    showToast(err.message, 'error');
+  }
+  refreshSavedFormState();
+});
+
+function resetSavedForm() {
+  savedAttachment = null;
+  $savedUrlInput.value = '';
+  $savedNoteInput.value = '';
+  renderSavedAttachment();
+  refreshSavedFormState();
+}
 
 $savedForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const url = $savedUrlInput.value.trim();
-  if (!isValidUrl(url)) {
-    $savedFormError.textContent = 'Enter a valid URL';
-    $savedFormError.hidden = false;
-    return;
-  }
+  const note = $savedNoteInput.value.trim() || undefined;
   $savedFormError.hidden = true;
   $savedAddBtn.disabled = true;
   try {
-    const preview = buildLinkPreview(url);
-    await api.saveBookmark(url, {
-      note:     $savedNoteInput.value.trim() || undefined,
-      platform: preview.platform?.id || undefined,
-      title:    preview.sublabel || undefined,
-    });
-    $savedUrlInput.value = '';
-    $savedNoteInput.value = '';
-    refreshSavedFormState();
+    if (savedAttachment) {
+      await api.saveFileBookmark({
+        url:         savedAttachment.url,
+        filePath:    savedAttachment.filePath,
+        fileName:    savedAttachment.fileName,
+        mimeType:    savedAttachment.mimeType,
+        messageType: savedAttachment.messageType,
+        note,
+      });
+    } else {
+      const url = $savedUrlInput.value.trim();
+      if (!isValidUrl(url)) {
+        $savedFormError.textContent = 'Enter a valid URL';
+        $savedFormError.hidden = false;
+        return;
+      }
+      const preview = buildLinkPreview(url);
+      await api.saveBookmark(url, {
+        note,
+        platform: preview.platform?.id || undefined,
+        title:    preview.sublabel || undefined,
+      });
+    }
+    resetSavedForm();
     showToast('Saved', 'success');
     loadBookmarks();
   } catch (err) {

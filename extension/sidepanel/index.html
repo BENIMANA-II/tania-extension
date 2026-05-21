@@ -17,13 +17,15 @@
         <div class="loader__circle"></div>
         <img class="loader__icon" src="../icons/icon-128.png" alt="Tania">
       </div>
-      <h1 class="loader__logo">Tania</h1>
+      <div class="loader__brand">
+        <h1 class="loader__logo">Tania</h1>
+        <p class="loader__tagline">Share with your circle</p>
+      </div>
       <div class="loader__dots">
         <span class="loader__dot"></span>
         <span class="loader__dot"></span>
         <span class="loader__dot"></span>
       </div>
-      <p class="loader__credit"><svg class="spyder-icon" viewBox="0 0 24 24"><circle cx="12" cy="11" r="3"/><circle cx="12" cy="17" r="2"/><path d="M5 2l2.5 5M19 2l-2.5 5M2 9l4.5 2M22 9l-4.5 2M5 20l3-4M19 20l-3-4M8 22l1.5-5M16 22l-1.5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg> <span class="spyder-brand">SPYDER</span> <svg class="spyder-icon" viewBox="0 0 24 24"><circle cx="12" cy="11" r="3"/><circle cx="12" cy="17" r="2"/><path d="M5 2l2.5 5M19 2l-2.5 5M2 9l4.5 2M22 9l-4.5 2M5 20l3-4M19 20l-3-4M8 22l1.5-5M16 22l-1.5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg></p>
     </div>
   </section>
 
@@ -126,18 +128,6 @@
 
     <!-- ===== INBOX (conversations) ===== -->
     <div id="view-inbox" class="view-content">
-      <section id="drop-zone" class="drop-zone">
-        <div class="drop-zone__content">
-          <svg class="drop-zone__icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-            <polyline points="17 8 12 3 7 8"/>
-            <line x1="12" y1="3" x2="12" y2="15"/>
-          </svg>
-          <p class="drop-zone__text">Drop a link to share</p>
-          <p class="drop-zone__hint">or paste a URL anywhere</p>
-        </div>
-      </section>
-
       <section class="feed">
         <div class="feed__header">
           <h2 class="feed__title">Chats</h2>
@@ -178,15 +168,24 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
         <div id="thread-header-info" class="thread-header__info"></div>
-        <button id="thread-share-toggle" class="thread-header__share" type="button" title="Share a link to this chat">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        </button>
       </header>
       <div id="thread-messages" class="thread-messages"></div>
-      <form id="thread-share-form" class="thread-share-form" hidden>
-        <input id="thread-url-input" class="input" type="text" placeholder="Paste a link to share" autocomplete="off">
-        <input id="thread-note-input" class="input" type="text" placeholder="Add a note (optional)" maxlength="500" hidden>
-        <button type="submit" id="thread-share-btn" class="btn btn--primary btn--sm" hidden>Send</button>
+      <div id="typing-indicator" class="typing-indicator" hidden>
+        <span class="typing-indicator__dots"><span></span><span></span><span></span></span>
+        <span class="typing-indicator__text"></span>
+      </div>
+      <form id="thread-composer" class="thread-composer">
+        <div id="composer-attachment" class="composer__attachment" hidden></div>
+        <div class="composer__row">
+          <button id="composer-attach" class="composer__attach" type="button" title="Attach image or document" aria-label="Attach a file">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+          <input id="composer-file" type="file" accept="image/jpeg,image/png,image/gif,image/webp,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.md,.rtf,.json,.zip" hidden>
+          <textarea id="composer-input" class="composer__input input" rows="1" placeholder="Message…" maxlength="4000" autocomplete="off"></textarea>
+          <button type="submit" id="composer-send" class="composer__send" title="Send" aria-label="Send" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </div>
       </form>
     </div>
 
@@ -218,22 +217,30 @@
 
       <section class="saved-form-section">
         <form id="saved-form" class="saved-form">
-          <input
-            id="saved-url-input"
-            type="text"
-            class="input"
-            placeholder="Paste a link to save"
-            autocomplete="off"
-          >
-          <input
-            id="saved-note-input"
-            type="text"
-            class="input"
-            placeholder="Add a note (optional)"
-            maxlength="500"
-            hidden
-          >
-          <button type="submit" class="btn btn--primary btn--sm" id="saved-add-btn" hidden>Save</button>
+          <div id="saved-attachment" class="saved-form__attachment" hidden></div>
+          <div class="saved-form__row">
+            <button id="saved-attach" class="saved-form__attach" type="button" title="Save an image or document" aria-label="Save a file">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <input id="saved-file" type="file" accept="image/jpeg,image/png,image/gif,image/webp,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.md,.rtf,.json,.zip" hidden>
+            <input
+              id="saved-url-input"
+              type="text"
+              class="input saved-form__url"
+              placeholder="Paste a link to save"
+              autocomplete="off"
+            >
+          </div>
+          <div id="saved-form-reveal" class="saved-form__reveal" hidden>
+            <input
+              id="saved-note-input"
+              type="text"
+              class="input saved-form__note"
+              placeholder="Add a note (optional)"
+              maxlength="500"
+            >
+            <button type="submit" class="btn btn--primary btn--sm" id="saved-add-btn">Save</button>
+          </div>
         </form>
         <p id="saved-form-error" class="form-error" hidden></p>
       </section>
@@ -421,7 +428,7 @@
         </div>
       </section>
 
-      <p class="settings-version">Tania v0.2.2</p>
+      <p class="settings-version">Tania v0.3.0</p>
     </div>
 
     <!-- Toast -->
@@ -476,6 +483,10 @@
         <button id="group-editor-close" class="btn-icon" type="button">&times;</button>
       </div>
       <div class="circle-editor__form">
+        <div class="group-editor__preview">
+          <span id="group-editor-preview-avatar" class="group-editor__preview-avatar"></span>
+          <span id="group-editor-preview-name" class="group-editor__preview-name">New group</span>
+        </div>
         <input id="group-editor-name" type="text" class="input" placeholder="Group name" maxlength="40" autocomplete="off">
         <div class="circle-editor__color-row">
           <span class="circle-editor__color-label">Avatar</span>
@@ -487,7 +498,7 @@
           <div id="group-editor-colors" class="circle-editor__colors"></div>
         </div>
       </div>
-      <p class="circle-editor__members-label">Members</p>
+      <p class="circle-editor__members-label">Members<span id="group-editor-member-count" class="circle-editor__members-count"></span></p>
       <div class="group-editor__member-search-wrap">
         <svg class="conversations-search__icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input id="group-editor-member-search" type="text" class="input group-editor__member-search" placeholder="Search your friends" autocomplete="off">
@@ -497,6 +508,11 @@
       </div>
       <p id="group-editor-error" class="form-error" hidden></p>
       <div class="picker__footer circle-editor__footer">
+        <div id="group-editor-delete-confirm" class="group-editor__confirm" hidden>
+          <span class="group-editor__confirm-text">Delete this group?</span>
+          <button id="group-editor-delete-cancel" class="btn btn--ghost btn--sm" type="button">Cancel</button>
+          <button id="group-editor-delete-yes" class="btn btn--sm group-editor__confirm-yes" type="button">Delete</button>
+        </div>
         <button id="group-editor-delete" class="btn btn--ghost btn--danger btn--sm" type="button" hidden>Delete</button>
         <button id="group-editor-save" class="btn btn--primary" type="button">Save</button>
       </div>
@@ -542,15 +558,26 @@
     <div class="picker">
       <div class="picker__handle"></div>
       <div class="picker__header">
-        <h3 class="picker__title">Start a conversation</h3>
+        <div class="picker__heading">
+          <h3 class="picker__title">Start a conversation</h3>
+          <p class="picker__subtitle">Pick a friend — or several to start a group</p>
+        </div>
         <button id="start-conv-close" class="btn-icon" type="button">&times;</button>
       </div>
       <div class="picker__search-wrap">
         <svg class="picker__search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input id="start-conv-search" type="text" class="input picker__search" placeholder="Search friends" autocomplete="off">
       </div>
-      <div id="start-conv-friends" class="picker__list">
+      <div id="start-conv-friends" class="picker__list" role="listbox" aria-multiselectable="true">
         <div class="feed__loading"><div class="spinner"></div><span>Loading friends...</span></div>
+      </div>
+      <div id="start-conv-footer" class="start-conv__footer" hidden>
+        <input id="start-conv-message" type="text" class="input start-conv__message" placeholder="Message (optional)…" maxlength="4000" autocomplete="off" hidden>
+        <input id="start-conv-group-name" type="text" class="input start-conv__group-name" placeholder="Group name" maxlength="40" autocomplete="off" hidden>
+        <div class="start-conv__actions">
+          <button id="start-conv-separate" class="btn btn--ghost start-conv__sep-btn" type="button" hidden>Send separately</button>
+          <button id="start-conv-go" class="btn btn--primary start-conv__go-btn" type="button" disabled>Start chat</button>
+        </div>
       </div>
     </div>
   </div>

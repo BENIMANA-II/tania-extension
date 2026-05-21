@@ -340,6 +340,13 @@ export const api = {
     return { user: merged };
   },
 
+  // Ids of accounts flagged profiles.is_creator — used to badge "Creator"
+  // users wherever they appear. Readable by all (profiles SELECT is open).
+  async getCreatorIds() {
+    const rows = await request('/rest/v1/profiles?is_creator=eq.true&select=id');
+    return { ids: (rows || []).map((r) => r.id) };
+  },
+
   // ---- Friends ----
 
   async getFriends() {
@@ -500,6 +507,127 @@ export const api = {
     return { message: 'Marked as read' };
   },
 
+  // ---- Chat messages (text / link / image / document) ----
+
+  async getConversationMessages({ peerId, groupId, after, pageSize } = {}) {
+    const rows = await rpc('get_conversation_messages', {
+      p_peer_id:  peerId  || null,
+      p_group_id: groupId || null,
+      after:      after   || null,
+      page_size:  pageSize || 50,
+    });
+    return { messages: (rows || []).map(mapMessageRow) };
+  },
+
+  // Unified thread: legacy link-shares + chat messages, merged chronologically.
+  // Each item carries a `kind` ('share' | 'message') the renderer branches on.
+  async getConversationFeed({ peerId, groupId, pageSize } = {}) {
+    const [{ messages: shares }, { messages }] = await Promise.all([
+      this.getConversationThread({ peerId, groupId, pageSize }),
+      this.getConversationMessages({ peerId, groupId, pageSize }),
+    ]);
+    const items = [
+      ...shares.map((s)   => ({ kind: 'share',   at: s.sharedAt,  ...s })),
+      ...messages.map((m) => ({ kind: 'message', at: m.createdAt, ...m })),
+    ].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+    return { items };
+  },
+
+  async sendMessage({
+    peerId, groupId, content, messageType = 'text',
+    url, title, ogTitle, ogDescription, ogImage,
+    filePath, fileName, fileSize, mimeType, platform,
+  } = {}) {
+    const id = await rpc('send_message', {
+      p_recipient_id:   peerId  || null,
+      p_group_id:       groupId || null,
+      p_content:        content || null,
+      p_message_type:   messageType,
+      p_url:            url || null,
+      p_title:          title || null,
+      p_og_title:       ogTitle || null,
+      p_og_description: ogDescription || null,
+      p_og_image:       ogImage || null,
+      p_file_path:      filePath || null,
+      p_file_name:      fileName || null,
+      p_file_size:      fileSize || null,
+      p_mime_type:      mimeType || null,
+      p_platform:       platform || null,
+    });
+    return { message: { id } };
+  },
+
+  async editMessage(messageId, newContent) {
+    await request(`/rest/v1/messages?id=eq.${messageId}`, {
+      method:  'PATCH',
+      headers: { Prefer: 'return=minimal' },
+      body:    JSON.stringify({ content: newContent, edited_at: new Date().toISOString() }),
+    });
+    return { message: 'Edited' };
+  },
+
+  async deleteMessage(messageId) {
+    await request(`/rest/v1/messages?id=eq.${messageId}`, {
+      method:  'PATCH',
+      headers: { Prefer: 'return=minimal' },
+      body:    JSON.stringify({ deleted_at: new Date().toISOString() }),
+    });
+    return { message: 'Deleted' };
+  },
+
+  async markMessagesRead({ peerId, groupId } = {}) {
+    await rpc('mark_messages_read', { p_peer_id: peerId || null, p_group_id: groupId || null });
+    return { message: 'Read' };
+  },
+
+  async markMessagesDelivered({ peerId, groupId } = {}) {
+    await rpc('mark_messages_delivered', { p_peer_id: peerId || null, p_group_id: groupId || null });
+    return { message: 'Delivered' };
+  },
+
+  // Mark every undelivered message addressed to me as delivered (called when
+  // the client is online, e.g. on inbox load), so senders see "Delivered".
+  async markAllDelivered() {
+    await rpc('mark_all_messages_delivered');
+    return { message: 'Delivered' };
+  },
+
+  // Compress images, upload images/documents (no video) to the public
+  // chat-uploads bucket, and return what sendMessage needs.
+  async uploadMessageFile(file) {
+    const detected = classifyUploadType(file.type);
+    if (!detected) throw new ApiError('Only images and documents can be sent.', 415);
+
+    const { user } = await getAuth();
+    if (!user?.id) throw new ApiError('Not signed in', 401);
+
+    let blob = file;
+    let ext  = (file.name.split('.').pop() || '').toLowerCase();
+    let contentType = file.type || 'application/octet-stream';
+
+    // Re-encode static images to a reasonably sized JPEG; leave GIFs (to keep
+    // animation) and documents untouched.
+    if (detected === 'image' && file.type !== 'image/gif') {
+      blob = await compressImage(file, 1280, 0.85);
+      ext = 'jpg';
+      contentType = 'image/jpeg';
+    }
+
+    const safeBase = (file.name.replace(/\.[^.]+$/, '') || 'file')
+      .replace(/[^a-z0-9_-]+/gi, '-').slice(0, 40);
+    const path = `${user.id}/${Date.now()}-${safeBase}.${ext}`;
+    const publicUrl = await uploadToChatBucket(path, blob, contentType);
+
+    return {
+      messageType: detected,
+      filePath:    path,
+      url:         publicUrl,
+      fileName:    file.name,
+      fileSize:    blob.size,
+      mimeType:    detected === 'image' && file.type !== 'image/gif' ? 'image/jpeg' : file.type,
+    };
+  },
+
   async getFeed(cursor) {
     const rows = await rpc('get_feed', { after: cursor || null, page_size: 20 });
     const feed = (rows || []).map((r) => ({
@@ -567,8 +695,11 @@ export const api = {
   },
 
   async getUnreadCount() {
-    const unread = await rpc('unread_share_count');
-    return { unread: unread || 0 };
+    const [shares, messages] = await Promise.all([
+      rpc('unread_share_count'),
+      rpc('unread_message_count'),
+    ]);
+    return { unread: (shares || 0) + (messages || 0) };
   },
 
   // Clears the current user's *incoming* messages only.
@@ -622,11 +753,47 @@ export const api = {
       ogTitle:       r.og_title,
       ogDescription: r.og_description,
       ogImage:       r.og_image,
-      sourceShareId: r.source_share_id,
+      messageType:   r.message_type,
+      filePath:      r.file_path,
+      fileName:      r.file_name,
+      mimeType:      r.mime_type,
+      sourceShareId:   r.source_share_id,
+      sourceMessageId: r.source_message_id,
+      sourceSender: r.source_sender_username
+        ? { username: r.source_sender_username, avatarKey: r.source_sender_avatar_key, avatarUrl: r.source_sender_avatar_url }
+        : null,
       savedAt:       r.saved_at,
     }));
     const nextCursor = bookmarks.length === 20 ? bookmarks[bookmarks.length - 1].savedAt : null;
     return { bookmarks, nextCursor };
+  },
+
+  async saveMessageToArchive(messageId) {
+    const id = await rpc('save_message_to_archive', { p_message_id: messageId });
+    return { bookmark: { id } };
+  },
+
+  // Save an uploaded image/document straight into the personal archive (not
+  // from a chat message). The file is already in storage (uploadMessageFile);
+  // this inserts the bookmark row. RLS gates the insert to owner_id = auth.uid().
+  async saveFileBookmark({ url, filePath, fileName, mimeType, messageType, note, title } = {}) {
+    const { user } = await getAuth();
+    if (!user) throw new ApiError('Not signed in', 401);
+    await request('/rest/v1/bookmarks', {
+      method:  'POST',
+      headers: { Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        owner_id:     user.id,
+        url:          url || null,
+        title:        title || fileName || null,
+        note:         note || null,
+        message_type: messageType,
+        file_path:    filePath || null,
+        file_name:    fileName || null,
+        mime_type:    mimeType || null,
+      }),
+    });
+    return { message: 'Saved' };
   },
 
   async deleteBookmark(bookmarkId) {
@@ -814,6 +981,14 @@ export const api = {
     await rpc('cancel_group_invitation', { p_invitation_id: invitationId });
     return { message: 'Invitation cancelled' };
   },
+
+  // ---- Realtime helpers ----
+
+  // Canonical conversation_id for a 1:1 peer thread, derived server-side so it
+  // matches what messages are stamped with. Used as the Realtime channel id.
+  async getPeerConversationId(peerId) {
+    return rpc('get_peer_conversation_id', { p_peer_id: peerId });
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -866,6 +1041,80 @@ async function uploadToAvatarsBucket(path, blob) {
   }
   // Public bucket → predictable URL. Bust caches with the timestamp in the path.
   return `${url}/storage/v1/object/public/avatars/${path}`;
+}
+
+// ---------------------------------------------------------------------------
+// Chat message helpers — row mapping + chat-uploads bucket
+// ---------------------------------------------------------------------------
+
+function mapMessageRow(r) {
+  return {
+    id:             r.id,
+    conversationId: r.conversation_id,
+    messageType:    r.message_type,
+    content:        r.content,
+    url:            r.url,
+    title:          r.title,
+    ogTitle:        r.og_title,
+    ogDescription:  r.og_description,
+    ogImage:        r.og_image,
+    filePath:       r.file_path,
+    fileName:       r.file_name,
+    fileSize:       r.file_size,
+    mimeType:       r.mime_type,
+    platform:       r.platform,
+    sender:         { id: r.sender_id, username: r.sender_username, avatarKey: r.sender_avatar_key, avatarUrl: r.sender_avatar_url },
+    direction:      r.direction,
+    recipientCount: r.recipient_count || 0,
+    deliveredCount: r.delivered_count || 0,
+    readCount:      r.read_count || 0,
+    edited:         !!r.edited_at,
+    editedAt:       r.edited_at,
+    deleted:        !!r.deleted_at,
+    createdAt:      r.created_at,
+  };
+}
+
+const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const ALLOWED_DOC_TYPES = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'text/plain', 'text/csv', 'text/markdown',
+  'application/rtf', 'application/json', 'application/zip',
+]);
+
+// → 'image' | 'document' | null (null = not allowed, e.g. video)
+function classifyUploadType(mime) {
+  if (ALLOWED_IMAGE_TYPES.has(mime)) return 'image';
+  if (ALLOWED_DOC_TYPES.has(mime))   return 'document';
+  return null;
+}
+
+async function uploadToChatBucket(path, blob, contentType) {
+  const { url, anonKey } = await getSupabaseConfig();
+  const { token } = await getAuth();
+  if (!token) throw new ApiError('Not signed in', 401);
+  const res = await fetch(`${url}/storage/v1/object/chat-uploads/${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization:  `Bearer ${token}`,
+      apikey:         anonKey,
+      'Content-Type': contentType,
+      'x-upsert':     'true',
+      'Cache-Control': 'public, max-age=31536000',
+    },
+    body: blob,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(`Upload failed: ${body || res.status}`, res.status);
+  }
+  return `${url}/storage/v1/object/public/chat-uploads/${path}`;
 }
 
 // ---------------------------------------------------------------------------
