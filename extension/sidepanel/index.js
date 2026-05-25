@@ -38,24 +38,7 @@ function initThemeToggle() {
 applyTheme();
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
 
-// --- Compact mode ---
 
-function applyCompact() {
-  const on = localStorage.getItem('tania-compact') === '1';
-  document.documentElement.setAttribute('data-compact', on ? 'true' : 'false');
-}
-
-function initCompactToggle() {
-  const $btn = document.getElementById('compact-toggle');
-  if (!$btn) return;
-  $btn.addEventListener('click', () => {
-    const next = localStorage.getItem('tania-compact') === '1' ? '0' : '1';
-    localStorage.setItem('tania-compact', next);
-    applyCompact();
-  });
-}
-
-applyCompact();
 
 import { api, getAuth, setAuth, clearAuth } from '../shared/api.js';
 import { isValidUrl, buildLinkPreview } from './lib/link-utils.js';
@@ -230,10 +213,13 @@ function hideLoader() {
 
 async function init() {
   initThemeToggle();
-  initCompactToggle();
   const { token, user } = await getAuth();
 
-  await showLoader(5000);
+  const { openedFromBubble } = await chrome.storage.local.get('openedFromBubble');
+  const loaderDuration = openedFromBubble ? 3000 : 5000;
+  if (openedFromBubble) chrome.storage.local.remove('openedFromBubble');
+
+  await showLoader(loaderDuration);
   await hideLoader();
 
   if (token && user) {
@@ -568,6 +554,19 @@ $signupForm.addEventListener('submit', async (e) => {
 });
 
 $settingsLogout.addEventListener('click', logout);
+
+// --- Minimize sidepanel to floating bubble ---
+
+const $minimizeBtn = document.getElementById('minimize-btn');
+if ($minimizeBtn) {
+  $minimizeBtn.addEventListener('click', async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      await chrome.runtime.sendMessage({ type: 'MINIMIZE_SIDEPANEL', tabId: tab?.id });
+    } catch {}
+    window.close();
+  });
+}
 
 // --- Clear chat history ---
 

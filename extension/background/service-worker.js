@@ -153,7 +153,7 @@ chrome.action.onClicked.addListener((tab) => {
 // Message router (sidepanel + content script ⇄ service worker)
 // ---------------------------------------------------------------------------
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
     case 'GET_AUTH':
       getSession().then(sendResponse);
@@ -188,6 +188,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     case 'CHECK_URL':
       checkSharedUrl(message.payload.url).then(sendResponse);
       return true;
+
+    case 'OPEN_SIDEPANEL': {
+      const tabId = sender.tab?.id;
+      if (tabId) {
+        chrome.storage.local.set({ openedFromBubble: true, isMinimized: false });
+        chrome.sidePanel.open({ tabId });
+        // Hide bubble on all tabs
+        chrome.tabs.query({}, (tabs) => {
+          for (const t of tabs) {
+            chrome.tabs.sendMessage(t.id, { type: 'HIDE_TANIA_BUBBLE' }).catch(() => {});
+          }
+        });
+      }
+      sendResponse({ ok: true });
+      return false;
+    }
+
+    case 'MINIMIZE_SIDEPANEL': {
+      chrome.storage.local.set({ isMinimized: true });
+      // Show bubble on all tabs
+      chrome.tabs.query({}, (tabs) => {
+        for (const t of tabs) {
+          chrome.tabs.sendMessage(t.id, { type: 'SHOW_TANIA_BUBBLE' }).catch(() => {});
+        }
+      });
+      sendResponse({ ok: true });
+      return false;
+    }
 
     default:
       return false;
