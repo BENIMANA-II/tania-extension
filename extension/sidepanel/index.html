@@ -19,7 +19,7 @@
       </div>
       <div class="loader__brand">
         <h1 class="loader__logo">Tania</h1>
-        <p class="loader__tagline">Share with your circle</p>
+        <p class="loader__tagline">Your Circle Your Space</p>
       </div>
     </div>
   </section>
@@ -103,8 +103,7 @@
     <header class="header">
       <div class="header__brand">
         <img class="header__icon" src="../icons/icon-48.png" alt="Tania">
-        <h1 class="header__logo">Tania</h1>
-        <p class="header__tagline">Share with your circle</p>
+        <span class="header__wordmark">Tania</span>
       </div>
       <button id="minimize-btn" class="header__minimize" type="button" title="Minimize to bubble" aria-label="Minimize">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -126,14 +125,20 @@
       <section class="feed">
         <div class="feed__header">
           <h2 class="feed__title">Chats</h2>
+          <button id="mark-all-read-btn" class="feed__header-action" type="button" title="Mark all as read" hidden>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+          </button>
         </div>
         <div class="conversations-search-wrap">
           <svg class="conversations-search__icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           <input id="conversations-search" type="text" class="input conversations-search" placeholder="Search chats" autocomplete="off">
+          <button id="conversations-search-clear" class="conversations-search__clear" type="button" hidden aria-label="Clear search">&times;</button>
         </div>
         <div id="conversations-loading" class="feed__loading" hidden>
-          <div class="spinner"></div>
-          <span>Loading...</span>
+          <div class="skeleton-row"><div class="skeleton-avatar"></div><div class="skeleton-lines"><div class="skeleton-line skeleton-line--head"></div><div class="skeleton-line skeleton-line--body"></div></div></div>
+          <div class="skeleton-row"><div class="skeleton-avatar"></div><div class="skeleton-lines"><div class="skeleton-line skeleton-line--head"></div><div class="skeleton-line skeleton-line--body"></div></div></div>
+          <div class="skeleton-row"><div class="skeleton-avatar"></div><div class="skeleton-lines"><div class="skeleton-line skeleton-line--head"></div><div class="skeleton-line skeleton-line--body"></div></div></div>
+          <div class="skeleton-row"><div class="skeleton-avatar"></div><div class="skeleton-lines"><div class="skeleton-line skeleton-line--head"></div><div class="skeleton-line skeleton-line--body"></div></div></div>
         </div>
         <ul id="conversations-list" class="conversations-list">
           <li id="conversations-empty" class="feed__empty-state">
@@ -145,6 +150,10 @@
           </li>
         </ul>
       </section>
+
+      <div id="inbox-context-menu" class="context-menu" hidden>
+        <button class="context-menu__item" data-context-mark-read>Mark as read</button>
+      </div>
 
       <button id="start-conv-btn" class="start-conv-btn" type="button" title="Start a new conversation" aria-label="Start a new conversation">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -406,7 +415,7 @@
           <div class="settings-card__row settings-clear-row">
             <div class="settings-clear-row__text">
               <span class="settings-card__label">Clear inbox</span>
-              <span class="settings-clear-row__hint">Hides every share sent to you from your Chats tab. Shares you've sent stay visible to recipients, and a reply from them will reopen the conversation.</span>
+              <span class="settings-clear-row__hint">Hides every chat from your view. Nothing is deleted — others still see what you sent them, and any reply will bring the conversation back. You can undo right after clearing.</span>
             </div>
             <button id="settings-clear-history" class="btn btn--ghost btn--danger btn--sm" type="button">Clear</button>
           </div>
@@ -423,7 +432,7 @@
         </div>
       </section>
 
-      <p class="settings-version">Tania v0.3.0</p>
+      <p class="settings-version">Tania v0.3.1</p>
     </div>
 
     <!-- Toast -->

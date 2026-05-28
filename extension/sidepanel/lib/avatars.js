@@ -24,6 +24,21 @@ export const AVATAR_PRESETS = [
   { key: 'flame',   emoji: '🔥', bg: '#dc2626' },
   { key: 'leaf',    emoji: '🍃', bg: '#15803d' },
   { key: 'star',    emoji: '⭐', bg: '#eab308' },
+  { key: 'lion',    emoji: '🦁', bg: '#b45309' },
+  { key: 'tiger',   emoji: '🐯', bg: '#ea580c' },
+  { key: 'monkey',  emoji: '🐵', bg: '#92400e' },
+  { key: 'cow',     emoji: '🐮', bg: '#57534e' },
+  { key: 'mouse',   emoji: '🐭', bg: '#a3a3a3' },
+  { key: 'hamster', emoji: '🐹', bg: '#d97706' },
+  { key: 'chick',   emoji: '🐤', bg: '#facc15' },
+  { key: 'snail',   emoji: '🐌', bg: '#65a30d' },
+  { key: 'butterfly', emoji: '🦋', bg: '#a21caf' },
+  { key: 'crab',    emoji: '🦀', bg: '#dc2626' },
+  { key: 'whale',   emoji: '🐳', bg: '#2563eb' },
+  { key: 'dolphin', emoji: '🐬', bg: '#0284c7' },
+  { key: 'cactus',  emoji: '🌵', bg: '#15803d' },
+  { key: 'cherry',  emoji: '🍒', bg: '#be123c' },
+  { key: 'pizza',   emoji: '🍕', bg: '#ea580c' },
 ];
 
 const FALLBACK_PALETTE = [

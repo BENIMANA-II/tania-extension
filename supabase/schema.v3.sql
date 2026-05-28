@@ -603,6 +603,21 @@ $$;
 
 grant execute on function public.mark_messages_read(uuid, uuid) to authenticated;
 
+create or replace function public.mark_all_messages_read()
+returns void
+language sql security invoker set search_path = public
+as $$
+  update public.message_recipients mr
+     set read = true, read_at = coalesce(mr.read_at, now()),
+         delivered = true, delivered_at = coalesce(mr.delivered_at, now())
+    from public.messages m
+   where mr.message_id = m.id
+     and mr.recipient_id = auth.uid()
+     and mr.read = false;
+$$;
+
+grant execute on function public.mark_all_messages_read() to authenticated;
+
 -- Mark every undelivered message addressed to the caller as delivered. Called
 -- when the client is online (on inbox load / app focus) so the sender sees
 -- "Delivered" even before the recipient opens the specific thread.
@@ -626,26 +641,34 @@ grant execute on function public.mark_all_messages_delivered() to authenticated;
 -- client mapping is unchanged (last_share_id is now always null — the client
 -- only uses it as an opaque marker).
 
+-- The function body references profiles.inbox_cleared_at (the Clear-inbox
+-- cursor — see section 8b). language sql functions are parsed and have
+-- their column references resolved at CREATE time, so the column must
+-- exist before this function is defined. Adding it here, idempotently;
+-- 8b's definition stays for documentation but is now a no-op.
+alter table public.profiles add column if not exists inbox_cleared_at timestamptz;
+
 drop function if exists public.get_conversations(timestamptz, int);
 create or replace function public.get_conversations(
   after timestamptz default null, page_size int default 5
 )
 returns table (
-  kind             text,
-  peer_id          uuid,
-  peer_username    varchar,
-  peer_avatar_key  varchar,
-  peer_avatar_url  text,
-  group_id         uuid,
-  group_name       varchar,
-  group_color      varchar,
-  group_avatar_key varchar,
-  group_avatar_url text,
-  last_share_id    uuid,
-  last_snippet     text,
-  last_sender_id   uuid,
-  last_at          timestamptz,
-  unread_count     int
+  kind              text,
+  peer_id           uuid,
+  peer_username     varchar,
+  peer_avatar_key   varchar,
+  peer_avatar_url   text,
+  group_id          uuid,
+  group_name        varchar,
+  group_color       varchar,
+  group_avatar_key  varchar,
+  group_avatar_url  text,
+  last_share_id     uuid,
+  last_snippet      text,
+  last_message_type varchar,
+  last_sender_id    uuid,
+  last_at           timestamptz,
+  unread_count      int
 )
 language sql security invoker set search_path = public stable
 as $$
@@ -655,6 +678,7 @@ as $$
       case when s.sender_id = auth.uid() then sr.recipient_id else s.sender_id end as peer_id,
       s.sender_id, s.created_at,
       coalesce(s.note, s.og_title, s.title, s.url) as snippet,
+      'share'::varchar(20) as message_type,
       case when sr.recipient_id = auth.uid() and sr.read = false then 1 else 0 end as is_unread
     from public.shares s
     join public.share_recipients sr on sr.share_id = s.id
@@ -665,7 +689,10 @@ as $$
     select
       case when m.sender_id = auth.uid() then m.recipient_id else m.sender_id end as peer_id,
       m.sender_id, m.created_at,
-      coalesce(m.content, m.og_title, m.title, m.file_name, m.url) as snippet,
+      case when m.deleted_at is not null then 'message deleted'
+           else coalesce(m.content, m.og_title, m.title, m.file_name, m.url)
+      end as snippet,
+      m.message_type,
       case when m.sender_id <> auth.uid()
                 and exists (select 1 from public.message_recipients mr
                             where mr.message_id = m.id and mr.recipient_id = auth.uid() and mr.read = false)
@@ -682,8 +709,9 @@ as $$
   peer_agg as (
     select peer_id,
            max(created_at) as last_at,
-           (array_agg(snippet   order by created_at desc))[1] as last_snippet,
-           (array_agg(sender_id order by created_at desc))[1] as last_sender_id,
+           (array_agg(snippet      order by created_at desc))[1] as last_snippet,
+           (array_agg(message_type order by created_at desc))[1] as last_message_type,
+           (array_agg(sender_id    order by created_at desc))[1] as last_sender_id,
            sum(is_unread)::int as unread_count
     from peer_rows
     where peer_id is not null
@@ -692,6 +720,7 @@ as $$
   group_share_rows as (
     select s.group_id, s.sender_id, s.created_at,
            coalesce(s.note, s.og_title, s.title, s.url) as snippet,
+           'share'::varchar(20) as message_type,
            case when sr.recipient_id is not null and sr.read = false then 1 else 0 end as is_unread
     from public.shares s
     join public.group_members gm on gm.group_id = s.group_id and gm.member_id = auth.uid()
@@ -700,7 +729,10 @@ as $$
   ),
   group_msg_rows as (
     select m.group_id, m.sender_id, m.created_at,
-           coalesce(m.content, m.og_title, m.title, m.file_name, m.url) as snippet,
+           case when m.deleted_at is not null then 'message deleted'
+                else coalesce(m.content, m.og_title, m.title, m.file_name, m.url)
+           end as snippet,
+           m.message_type,
            case when m.sender_id <> auth.uid()
                      and exists (select 1 from public.message_recipients mr
                                  where mr.message_id = m.id and mr.recipient_id = auth.uid() and mr.read = false)
@@ -717,8 +749,9 @@ as $$
   group_agg as (
     select group_id,
            max(created_at) as last_at,
-           (array_agg(snippet   order by created_at desc))[1] as last_snippet,
-           (array_agg(sender_id order by created_at desc))[1] as last_sender_id,
+           (array_agg(snippet      order by created_at desc))[1] as last_snippet,
+           (array_agg(message_type order by created_at desc))[1] as last_message_type,
+           (array_agg(sender_id    order by created_at desc))[1] as last_sender_id,
            sum(is_unread)::int as unread_count
     from group_rows
     group by group_id
@@ -728,33 +761,104 @@ as $$
            p.avatar_key as peer_avatar_key, p.avatar_url as peer_avatar_url,
            null::uuid as group_id, null::varchar as group_name, null::varchar as group_color,
            null::varchar as group_avatar_key, null::text as group_avatar_url,
-           null::uuid as last_share_id, pa.last_snippet, pa.last_sender_id, pa.last_at, pa.unread_count
+           null::uuid as last_share_id, pa.last_snippet, pa.last_message_type,
+           pa.last_sender_id, pa.last_at, pa.unread_count
     from peer_agg pa
     join public.profiles p on p.id = pa.peer_id
     union all
     select 'group'::text, null::uuid, null::varchar, null::varchar, null::text,
            g.id, g.name, g.color, g.avatar_key, g.avatar_url,
-           null::uuid, ga.last_snippet, ga.last_sender_id, ga.last_at, ga.unread_count
+           null::uuid, ga.last_snippet, ga.last_message_type,
+           ga.last_sender_id, ga.last_at, ga.unread_count
     from group_agg ga
     join public.groups g on g.id = ga.group_id
   )
   select * from unified
   where (after is null or last_at < after)
+    and last_at > coalesce(
+      (select inbox_cleared_at from public.profiles where id = auth.uid()),
+      '-infinity'::timestamptz
+    )
   order by last_at desc nulls last
   limit greatest(1, least(page_size, 50));
 $$;
 
 grant execute on function public.get_conversations(timestamptz, int) to authenticated;
 
+-- ===========================================================================
+-- 8b. Clear-inbox cursor (Settings → Clear inbox)
+-- ===========================================================================
+-- A per-user "everything before this is hidden from MY inbox" timestamp.
+-- Reversible (no data destroyed; sent shares/messages are still visible to
+-- their recipients), uniform across shares and chat messages, and a single
+-- one-row UPDATE on the user's own profile. get_conversations (above) filters
+-- by this cursor; unread_message_count and unread_share_count also apply it
+-- so the badge zeros out after a clear.
+
+alter table public.profiles add column if not exists inbox_cleared_at timestamptz;
+
+create or replace function public.clear_inbox()
+returns void
+language sql security invoker set search_path = public
+as $$
+  update public.profiles
+     set inbox_cleared_at = now()
+   where id = auth.uid();
+$$;
+
+grant execute on function public.clear_inbox() to authenticated;
+
+-- Undo a clear by nulling the cursor. The cleared rows were never destroyed,
+-- so this restores the inbox exactly as it was. Trivially reversible because
+-- the entire feature is just a cursor.
+
+create or replace function public.undo_clear_inbox()
+returns void
+language sql security invoker set search_path = public
+as $$
+  update public.profiles
+     set inbox_cleared_at = null
+   where id = auth.uid();
+$$;
+
+grant execute on function public.undo_clear_inbox() to authenticated;
+
+-- Re-create the unread counters to respect the cursor. (Original versions
+-- live in schema.sql / schema.v2.sql — overriding here so a clear actually
+-- zeros the badge.)
+
+create or replace function public.unread_share_count()
+returns int
+language sql security invoker set search_path = public stable
+as $$
+  select count(*)::int from public.share_recipients sr
+  join public.shares s on s.id = sr.share_id
+  where sr.recipient_id = auth.uid()
+    and sr.read = false
+    and s.created_at > coalesce(
+      (select inbox_cleared_at from public.profiles where id = auth.uid()),
+      '-infinity'::timestamptz
+    );
+$$;
+
+grant execute on function public.unread_share_count() to authenticated;
+
 -- Unread chat-message count for the toolbar badge (added to the existing
 -- unread_share_count by the service worker, so the badge reflects both).
+-- Filters by the inbox_cleared_at cursor (8b) so a Clear-inbox zeroes the badge.
 create or replace function public.unread_message_count()
 returns int
 language sql security invoker set search_path = public stable
 as $$
   select count(*)::int
   from public.message_recipients mr
-  where mr.recipient_id = auth.uid() and mr.read = false;
+  join public.messages m on m.id = mr.message_id
+  where mr.recipient_id = auth.uid()
+    and mr.read = false
+    and m.created_at > coalesce(
+      (select inbox_cleared_at from public.profiles where id = auth.uid()),
+      '-infinity'::timestamptz
+    );
 $$;
 
 grant execute on function public.unread_message_count() to authenticated;
@@ -867,7 +971,91 @@ $$;
 grant execute on function public.save_message_to_archive(uuid) to authenticated;
 
 -- ===========================================================================
--- 10. Creator badge — flag specific accounts as "Creator"
+-- 10. New-message notifications (for the service-worker poller)
+-- ===========================================================================
+-- Returns the latest unread message per conversation created after `after`,
+-- with sender + peer/group display info so the SW can fire a system
+-- notification without another round-trip to resolve names.
+
+create or replace function public.get_new_messages(after timestamptz default null)
+returns table (
+  id              uuid,
+  sender_id       uuid,
+  sender_username varchar,
+  snippet         text,
+  message_type    varchar(20),
+  created_at      timestamptz,
+  peer_id         uuid,
+  peer_username   varchar,
+  group_id        uuid,
+  group_name      varchar
+)
+language sql security invoker set search_path = public stable
+as $$
+  select distinct on (m.conversation_id)
+    m.id, m.sender_id, p.username as sender_username,
+    coalesce(nullif(m.content, ''), m.og_title, m.title, m.file_name, m.url) as snippet,
+    m.message_type, m.created_at,
+    case when m.recipient_id is not null then
+      case when m.sender_id = auth.uid() then m.recipient_id else m.sender_id end
+    end as peer_id,
+    pr.username as peer_username,
+    m.group_id,
+    g.name as group_name
+  from public.messages m
+  join public.profiles p on p.id = m.sender_id
+  left join public.profiles pr on pr.id = (
+    case when m.recipient_id is not null then
+      case when m.sender_id = auth.uid() then m.recipient_id else m.sender_id end
+    else null end
+  )
+  left join public.groups g on g.id = m.group_id
+  where m.sender_id <> auth.uid()
+    and m.deleted_at is null
+    and (after is null or m.created_at > after)
+    and exists (select 1 from public.message_recipients mr
+                where mr.message_id = m.id and mr.recipient_id = auth.uid() and mr.read = false)
+  order by m.conversation_id, m.created_at desc;
+$$;
+
+grant execute on function public.get_new_messages(timestamptz) to authenticated;
+
+-- ===========================================================================
+-- 10b. Accept-notifications — let inviters know their group invite landed
+-- ===========================================================================
+-- group_invitations.responded_at already records when the invitee responded,
+-- so we can key off it directly. Returns the invitations *I* sent that
+-- flipped to 'accepted' after the supplied cursor — newest first, capped
+-- at 10. The friend-request equivalent is handled service-worker-side by
+-- diffing the friend list (friendships has no accepted_at column).
+
+create or replace function public.list_new_accepted_group_invitations(after timestamptz default null)
+returns table (
+  invitation_id    uuid,
+  group_id         uuid,
+  group_name       varchar,
+  invitee_id       uuid,
+  invitee_username varchar,
+  responded_at     timestamptz
+)
+language sql security invoker set search_path = public stable
+as $$
+  select inv.id, inv.group_id, g.name, inv.invitee_id, p.username, inv.responded_at
+  from public.group_invitations inv
+  join public.groups g   on g.id = inv.group_id
+  join public.profiles p on p.id = inv.invitee_id
+  where inv.inviter_id = auth.uid()
+    and inv.status = 'accepted'
+    and inv.responded_at is not null
+    and (after is null or inv.responded_at > after)
+  order by inv.responded_at desc
+  limit 10;
+$$;
+
+grant execute on function public.list_new_accepted_group_invitations(timestamptz) to authenticated;
+
+-- ===========================================================================
+-- 11. Creator badge — flag specific accounts as "Creator"
 -- ===========================================================================
 -- profiles.is_creator marks built-in/owner accounts. It's seeded by email
 -- against auth.users (only the SQL editor / service role can read auth.users;

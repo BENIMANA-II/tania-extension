@@ -43,7 +43,8 @@ async function setSession(session) {
 async function clearSession() {
   await chrome.storage.local.remove([
     'accessToken', 'refreshToken', 'expiresAt', 'user',
-    'lastNotifiedAt', 'lastInviteNotifiedAt',
+    'lastNotifiedAt', 'lastMsgNotifiedAt', 'lastInviteNotifiedAt',
+    'lastAcceptedInviteAt', 'friendIdsSeen',
   ]);
 }
 
@@ -146,7 +147,13 @@ function rpc(name, params = {}) {
 // ---------------------------------------------------------------------------
 
 chrome.action.onClicked.addListener((tab) => {
+  chrome.storage.local.set({ isMinimized: false });
   chrome.sidePanel.open({ tabId: tab.id });
+  chrome.tabs.query({}, (tabs) => {
+    for (const t of tabs) {
+      chrome.tabs.sendMessage(t.id, { type: 'HIDE_TANIA_BUBBLE' }).catch(() => {});
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -160,7 +167,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case 'SET_AUTH':
-      setSession(message.payload).then(() => {
+      setSession(message.payload).then(async () => {
+        // Seed notification cursors to "now" so the very first share/message/invite
+        // that arrives after sign-in does fire a notification. Without this, the
+        // notify* helpers each silently seed on their first run and swallow it.
+        const nowIso = new Date().toISOString();
+        const seed = {};
+        const existing = await chrome.storage.local.get([
+          'lastNotifiedAt', 'lastMsgNotifiedAt', 'lastInviteNotifiedAt', 'lastAcceptedInviteAt',
+        ]);
+        if (!existing.lastNotifiedAt)         seed.lastNotifiedAt         = nowIso;
+        if (!existing.lastMsgNotifiedAt)      seed.lastMsgNotifiedAt      = nowIso;
+        if (!existing.lastInviteNotifiedAt)   seed.lastInviteNotifiedAt   = nowIso;
+        if (!existing.lastAcceptedInviteAt)   seed.lastAcceptedInviteAt   = nowIso;
+        if (Object.keys(seed).length) await chrome.storage.local.set(seed);
+        // friendIdsSeen seeds itself on first poll (the helper does this
+        // explicitly so we don't have to RPC during sign-in here).
+
         sendResponse({ ok: true });
         startPolling();
         pollUnreadCount();
@@ -201,6 +224,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
         });
       }
+      sendResponse({ ok: true });
+      return false;
+    }
+
+    case 'SIDEPANEL_OPENED': {
+      chrome.storage.local.set({ isMinimized: false });
+      chrome.tabs.query({}, (tabs) => {
+        for (const t of tabs) {
+          chrome.tabs.sendMessage(t.id, { type: 'HIDE_TANIA_BUBBLE' }).catch(() => {});
+        }
+      });
       sendResponse({ ok: true });
       return false;
     }
@@ -275,13 +309,18 @@ async function pollUnreadCount() {
       clearBadge();
       return;
     }
-    const [shareUnread, msgUnread] = await Promise.all([
+    const [shareUnread, msgUnread, pendingInvites] = await Promise.all([
       rpc('unread_share_count'),
       rpc('unread_message_count'),
+      rpc('list_my_pending_group_invitations').catch(() => []),
     ]);
-    setBadge((shareUnread || 0) + (msgUnread || 0));
+    const inviteCount = Array.isArray(pendingInvites) ? pendingInvites.length : 0;
+    setBadge((shareUnread || 0) + (msgUnread || 0) + inviteCount);
     if ((shareUnread || 0) > 0) await notifyNewShares();
+    if ((msgUnread || 0) > 0) await notifyNewMessages();
     await notifyNewGroupInvitations();
+    await notifyAcceptedGroupInvitations();
+    await notifyAcceptedFriendRequests();
   } catch (err) {
     if (err.message === 'Session expired') {
       clearBadge();
@@ -370,7 +409,134 @@ async function notifyNewGroupInvitations() {
   if (fresh.length > 0) {
     const newest = fresh[fresh.length - 1].created_at;
     await chrome.storage.local.set({ lastInviteNotifiedAt: newest });
+    // Nudge any open side panel to refresh its Groups view live. The panel
+    // listens for this on a runtime message and re-runs loadGroups() if the
+    // Friends view is currently active.
+    chrome.runtime.sendMessage({ type: 'NEW_GROUP_INVITATIONS', count: fresh.length }).catch(() => {});
   }
+}
+
+// ---------------------------------------------------------------------------
+// New-message notifications (chat messages, not legacy shares)
+// ---------------------------------------------------------------------------
+
+const MSG_NOTIF_LABEL = {
+  text:     '',
+  image:    '\ud83d\udcf7 Photo',
+  document: '\ud83d\udcce Document',
+  link:     '\ud83d\udd17 Link',
+};
+
+async function notifyNewMessages() {
+  const { notificationsEnabled = true, lastMsgNotifiedAt } =
+    await chrome.storage.local.get(['notificationsEnabled', 'lastMsgNotifiedAt']);
+  if (notificationsEnabled === false) return;
+
+  const rows = await rpc('get_new_messages', { after: lastMsgNotifiedAt || null });
+  if (!rows || rows.length === 0) return;
+
+  // Seed on first run: record cursor without notifying.
+  if (!lastMsgNotifiedAt) {
+    const newest = rows.reduce((a, b) => (a.created_at > b.created_at ? a : b)).created_at;
+    await chrome.storage.local.set({ lastMsgNotifiedAt: newest });
+    return;
+  }
+
+  for (const r of rows) {
+    const label = MSG_NOTIF_LABEL[r.message_type] || '';
+    const body  = label || (r.snippet || '').slice(0, 200);
+    const via   = r.group_name ? `${r.group_name} — ${r.sender_username}` : r.sender_username;
+    const title = `${via} sent a message`;
+    chrome.notifications.create(`tania-msg-${r.id}`, {
+      type:     'basic',
+      iconUrl:  chrome.runtime.getURL('icons/icon-128.png'),
+      title,
+      message:  body,
+      priority: 0,
+    });
+  }
+
+  if (rows.length > 0) {
+    const newest = rows.reduce((a, b) => (a.created_at > b.created_at ? a : b)).created_at;
+    await chrome.storage.local.set({ lastMsgNotifiedAt: newest });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Accept-notifications — fire when *your* friend request or group invite is
+// accepted. Group side uses a server cursor on responded_at. Friend side
+// has no accepted_at column, so we diff the current accepted-friend ID set
+// against a stored snapshot. Both paths seed silently on first run.
+// ---------------------------------------------------------------------------
+
+async function notifyAcceptedGroupInvitations() {
+  const { notificationsEnabled = true, lastAcceptedInviteAt } =
+    await chrome.storage.local.get(['notificationsEnabled', 'lastAcceptedInviteAt']);
+  if (notificationsEnabled === false) return;
+
+  const rows = await rpc('list_new_accepted_group_invitations', { after: lastAcceptedInviteAt || null });
+  if (!rows || rows.length === 0) return;
+
+  if (!lastAcceptedInviteAt) {
+    const newest = rows.reduce((a, b) => (a.responded_at > b.responded_at ? a : b)).responded_at;
+    await chrome.storage.local.set({ lastAcceptedInviteAt: newest });
+    return;
+  }
+
+  const fresh = rows
+    .filter((r) => r.responded_at > lastAcceptedInviteAt)
+    .sort((a, b) => (a.responded_at < b.responded_at ? -1 : 1));
+
+  for (const r of fresh) {
+    chrome.notifications.create(`tania-invite-accepted-${r.invitation_id}`, {
+      type:     'basic',
+      iconUrl:  chrome.runtime.getURL('icons/icon-128.png'),
+      title:    'Invitation accepted',
+      message:  `${r.invitee_username} joined "${r.group_name}".`,
+      priority: 0,
+    });
+  }
+
+  if (fresh.length > 0) {
+    const newest = fresh[fresh.length - 1].responded_at;
+    await chrome.storage.local.set({ lastAcceptedInviteAt: newest });
+  }
+}
+
+async function notifyAcceptedFriendRequests() {
+  const { notificationsEnabled = true, friendIdsSeen } =
+    await chrome.storage.local.get(['notificationsEnabled', 'friendIdsSeen']);
+  if (notificationsEnabled === false) return;
+
+  // get_friends_view returns one row per friendship with kind in
+  // ('friend' | 'incoming' | 'outgoing'). We only want fully-accepted ones,
+  // so filter to kind='friend'. The RPC doesn't expose who-sent-vs-who-
+  // accepted, so a newly-appearing friend can be either: the other party
+  // accepted my request, or I just accepted theirs. We notify in both
+  // cases — surfacing the new friendship is useful regardless.
+  const rows = await rpc('get_friends_view').catch(() => []);
+  const acceptedFriends = (rows || []).filter((r) => r.kind === 'friend');
+  const currentIds = acceptedFriends.map((f) => f.user_id).filter(Boolean);
+
+  if (!friendIdsSeen) {
+    await chrome.storage.local.set({ friendIdsSeen: currentIds });
+    return;
+  }
+
+  const seenSet = new Set(friendIdsSeen);
+  const newlyAccepted = acceptedFriends.filter((f) => !seenSet.has(f.user_id));
+
+  for (const f of newlyAccepted) {
+    chrome.notifications.create(`tania-friend-accepted-${f.user_id}`, {
+      type:     'basic',
+      iconUrl:  chrome.runtime.getURL('icons/icon-128.png'),
+      title:    'Friend request accepted',
+      message:  `You and ${f.username} are now friends.`,
+      priority: 0,
+    });
+  }
+
+  await chrome.storage.local.set({ friendIdsSeen: currentIds });
 }
 
 chrome.notifications.onClicked.addListener(async (notificationId) => {
@@ -405,11 +571,30 @@ function clearBadge() {
 // ---------------------------------------------------------------------------
 
 function resumeIfSignedIn() {
-  getSession().then(({ accessToken }) => {
-    if (accessToken) {
-      startPolling();
-      pollUnreadCount();
+  chrome.storage.local.set({ isMinimized: false });
+  chrome.tabs.query({}, (tabs) => {
+    for (const t of tabs) {
+      chrome.tabs.sendMessage(t.id, { type: 'HIDE_TANIA_BUBBLE' }).catch(() => {});
     }
+  });
+  getSession().then(async ({ accessToken }) => {
+    if (!accessToken) return;
+    // Mirror the SET_AUTH seeding so users on a long-lived session don't lose
+    // their first post-update notification to the seed-and-skip branch in the
+    // notify* helpers (cursors get wiped on sign-out but not on update).
+    const nowIso = new Date().toISOString();
+    const existing = await chrome.storage.local.get([
+      'lastNotifiedAt', 'lastMsgNotifiedAt', 'lastInviteNotifiedAt', 'lastAcceptedInviteAt',
+    ]);
+    const seed = {};
+    if (!existing.lastNotifiedAt)         seed.lastNotifiedAt         = nowIso;
+    if (!existing.lastMsgNotifiedAt)      seed.lastMsgNotifiedAt      = nowIso;
+    if (!existing.lastInviteNotifiedAt)   seed.lastInviteNotifiedAt   = nowIso;
+    if (!existing.lastAcceptedInviteAt)   seed.lastAcceptedInviteAt   = nowIso;
+    if (Object.keys(seed).length) await chrome.storage.local.set(seed);
+
+    startPolling();
+    pollUnreadCount();
   });
 }
 

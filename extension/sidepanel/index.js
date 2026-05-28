@@ -40,7 +40,7 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', app
 
 
 
-import { api, getAuth, setAuth, clearAuth } from '../shared/api.js';
+import { api, getAuth, setAuth, clearAuth, refreshSession } from '../shared/api.js';
 import { isValidUrl, buildLinkPreview } from './lib/link-utils.js';
 import { AVATAR_PRESETS, avatarHtml } from './lib/avatars.js';
 import {
@@ -103,6 +103,9 @@ const $viewSettings  = document.getElementById('view-settings');
 const $conversationsLoading = document.getElementById('conversations-loading');
 const $conversationsList  = document.getElementById('conversations-list');
 const $conversationsSearch = document.getElementById('conversations-search');
+const $conversationsSearchClear = document.getElementById('conversations-search-clear');
+const $markAllReadBtn = document.getElementById('mark-all-read-btn');
+const $inboxContextMenu = document.getElementById('inbox-context-menu');
 
 // --- DOM: Thread ---
 
@@ -212,8 +215,25 @@ function hideLoader() {
 }
 
 async function init() {
+  chrome.runtime.sendMessage({ type: 'SIDEPANEL_OPENED' }).catch(() => {});
   initThemeToggle();
-  const { token, user } = await getAuth();
+  let { token, refreshToken, expiresAt, user } = await getAuth();
+
+  // If the token is expired or close to expiring, try refreshing now
+  // so we don't show the app then immediately redirect to login.
+  if (token && refreshToken && expiresAt && expiresAt - Date.now() < 120_000) {
+    try {
+      const refreshed = await refreshSession();
+      token = refreshed.accessToken;
+      user = refreshed.user;
+    } catch (err) {
+      // Only clear local state for auth errors (401), not network errors
+      if (err.status === 401) {
+        token = null;
+        user = null;
+      }
+    }
+  }
 
   const { openedFromBubble } = await chrome.storage.local.get('openedFromBubble');
   const loaderDuration = openedFromBubble ? 3000 : 5000;
@@ -446,6 +466,7 @@ function resetViewState() {
   friendsListLoading = false;
   friendsCurrentQuery = '';
   pendingRequestCount = 0;
+  pendingGroupInviteCount = 0;
   renderPendingBadge();
 
   // Groups
@@ -571,42 +592,94 @@ if ($minimizeBtn) {
 // --- Clear chat history ---
 
 const $settingsClearHistory = document.getElementById('settings-clear-history');
-if ($settingsClearHistory) {
-  $settingsClearHistory.addEventListener('click', async () => {
-    const ok = confirm(
-      'Clear your inbox?\n\n' +
-      'This hides every share that\'s been sent to you from your Chats tab.\n\n' +
-      'Shares you\'ve sent are NOT deleted — the people you sent them to ' +
-      'will still see them, and if any of them replies the conversation ' +
-      'will reappear here.\n\n' +
-      'This can\'t be undone for you.'
-    );
-    if (!ok) return;
 
-    $settingsClearHistory.disabled = true;
-    const prevLabel = $settingsClearHistory.textContent;
-    $settingsClearHistory.textContent = 'Clearing…';
-    try {
-      await api.clearChatHistory();
-      conversationsCache = [];
-      conversationsCursor = null;
-      conversationsAtEnd = false;
-      if ($conversationsList) $conversationsList.innerHTML = '';
-      if (currentThread) {
-        currentThread = null;
-        $viewThread.hidden = true;
-        $viewInbox.hidden = false;
-        resetComposer();
-      }
-      refreshUnreadCount();
-      if (currentView === 'inbox') loadConversations();
-      showToast('Inbox cleared', 'success');
-    } catch (err) {
-      showToast(err.message || 'Could not clear inbox', 'error');
-    } finally {
-      $settingsClearHistory.disabled = false;
-      $settingsClearHistory.textContent = prevLabel;
+if ($settingsClearHistory) {
+  // Inline confirm replaces native confirm() — that dialog was unreliable in
+  // some Chrome side-panel builds (silently no-op'd). The new flow:
+  //   Click Clear → button swaps for [Cancel] [Clear inbox]; Cancel is the
+  //   default focus + Esc closes; Enter commits. After clear, a toast with
+  //   Undo lets the user restore everything (the cursor is reversible).
+
+  const refreshInboxAfterChange = () => {
+    conversationsCache = [];
+    conversationsCursor = null;
+    conversationsAtEnd = false;
+    if ($conversationsList) $conversationsList.innerHTML = '';
+    if (currentThread) {
+      currentThread = null;
+      $viewThread.hidden = true;
+      $viewInbox.hidden = false;
+      resetComposer();
     }
+    refreshUnreadCount();
+    if (currentView === 'inbox') loadConversations();
+  };
+
+  $settingsClearHistory.addEventListener('click', () => {
+    const row = $settingsClearHistory.closest('.settings-card__row');
+    if (!row) return;
+    if (row.querySelector('.settings-clear-row__confirm')) return;
+
+    const confirmEl = document.createElement('div');
+    confirmEl.className = 'settings-clear-row__confirm';
+    confirmEl.setAttribute('role', 'group');
+    confirmEl.setAttribute('aria-label', 'Confirm clear inbox');
+    confirmEl.innerHTML = `
+      <button type="button" class="btn btn--ghost btn--sm" data-clear-cancel>Cancel</button>
+      <button type="button" class="btn btn--sm settings-clear-row__yes" data-clear-yes>Clear inbox</button>
+    `;
+    $settingsClearHistory.hidden = true;
+    row.appendChild(confirmEl);
+
+    const cancelBtn = confirmEl.querySelector('[data-clear-cancel]');
+    const yesBtn    = confirmEl.querySelector('[data-clear-yes]');
+    // Cancel is the safe default — focus it so Enter doesn't commit and Esc
+    // and Space both cancel the destructive action.
+    cancelBtn.focus();
+
+    const cleanup = () => {
+      confirmEl.remove();
+      $settingsClearHistory.hidden = false;
+      document.removeEventListener('keydown', onKey);
+      $settingsClearHistory.focus();
+    };
+
+    const commit = async () => {
+      yesBtn.disabled = true;
+      cancelBtn.disabled = true;
+      yesBtn.textContent = 'Clearing…';
+      try {
+        await api.clearInbox();
+        refreshInboxAfterChange();
+        cleanup();
+        showToast('Inbox cleared', 'success', {
+          label: 'Undo',
+          onClick: async () => {
+            try {
+              await api.undoClearInbox();
+              refreshInboxAfterChange();
+              showToast('Inbox restored', 'success');
+            } catch (err) {
+              showToast(err.message || 'Could not restore inbox', 'error');
+            }
+          },
+        });
+      } catch (err) {
+        showToast(err.message || 'Could not clear inbox', 'error');
+        yesBtn.disabled = false;
+        cancelBtn.disabled = false;
+        yesBtn.textContent = 'Clear inbox';
+      }
+    };
+
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); cleanup(); }
+      else if (e.key === 'Enter' && e.target === yesBtn) { e.preventDefault(); commit(); }
+    };
+    document.addEventListener('keydown', onKey);
+
+    cancelBtn.addEventListener('click', cleanup);
+    yesBtn.addEventListener('click', commit);
   });
 }
 
@@ -718,11 +791,33 @@ function hideError() { $errorBanner.hidden = true; }
 $errorClose.addEventListener('click', hideError);
 
 let toastTimer;
-function showToast(message, type = 'success') {
+// Optional `action` parameter: { label, onClick } adds an inline action
+// button (e.g. Undo) and stretches the toast lifetime. Callers that only
+// pass a message + type keep the original 2.5s behavior.
+function showToast(message, type = 'success', action = null) {
   clearTimeout(toastTimer);
-  $toast.textContent = message;
-  $toast.className = `toast toast--${type} toast--visible`;
-  toastTimer = setTimeout(() => $toast.classList.remove('toast--visible'), 2500);
+  $toast.innerHTML = '';
+  const text = document.createElement('span');
+  text.className = 'toast__text';
+  text.textContent = message;
+  $toast.appendChild(text);
+
+  if (action) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toast__action';
+    btn.textContent = action.label;
+    btn.addEventListener('click', () => {
+      clearTimeout(toastTimer);
+      $toast.classList.remove('toast--visible');
+      try { action.onClick(); } catch { /* noop */ }
+    });
+    $toast.appendChild(btn);
+  }
+
+  $toast.className = `toast toast--${type}${action ? ' toast--with-action' : ''} toast--visible`;
+  const duration = action ? 6500 : 2500;
+  toastTimer = setTimeout(() => $toast.classList.remove('toast--visible'), duration);
 }
 
 // ============================================================
@@ -747,16 +842,23 @@ function renderNavBadge() {
   } else {
     $navUnread.hidden = true;
   }
+  if ($markAllReadBtn) $markAllReadBtn.hidden = unreadCount === 0;
 }
 
 // ============================================================
 //  PENDING FRIEND REQUEST COUNT (nav badge)
 // ============================================================
 
+let pendingGroupInviteCount = 0;
+
 async function refreshPendingCount() {
   try {
-    const { count } = await api.getPendingCount();
+    const [{ count }, invitationsResult] = await Promise.all([
+      api.getPendingCount(),
+      api.listMyGroupInvitations().catch(() => ({ invitations: [] })),
+    ]);
     pendingRequestCount = count;
+    pendingGroupInviteCount = (invitationsResult.invitations || []).length;
     renderPendingBadge();
   } catch {
     // Non-critical
@@ -764,13 +866,23 @@ async function refreshPendingCount() {
 }
 
 function renderPendingBadge() {
-  if (pendingRequestCount > 0) {
-    $navPending.textContent = pendingRequestCount > 99 ? '99+' : String(pendingRequestCount);
+  const total = pendingRequestCount + pendingGroupInviteCount;
+  if (total > 0) {
+    $navPending.textContent = total > 99 ? '99+' : String(total);
     $navPending.hidden = false;
   } else {
     $navPending.hidden = true;
   }
 }
+
+// SW pushes this when its poll picks up new group invitations. Refresh the
+// Groups view if it's already on screen, and re-pull the badge count.
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === 'NEW_GROUP_INVITATIONS') {
+    refreshPendingCount();
+    if (currentView === 'friends') loadGroups();
+  }
+});
 
 // ============================================================
 //  CONVERSATIONS (inbox grouped by peer / group)
@@ -887,16 +999,118 @@ function renderConversationsList() {
       </li>`;
     return;
   }
-  filtered.forEach((c) => $conversationsList.appendChild(renderConversationRow(c)));
+  filtered.forEach((c, i) => $conversationsList.appendChild(renderConversationRow(c, i)));
 }
 
 if ($conversationsSearch) {
-  $conversationsSearch.addEventListener('input', renderConversationsList);
+  $conversationsSearch.addEventListener('input', () => {
+    renderConversationsList();
+    if ($conversationsSearchClear) $conversationsSearchClear.hidden = !$conversationsSearch.value;
+  });
 }
 
-function renderConversationRow(c) {
+if ($conversationsSearchClear) {
+  $conversationsSearchClear.addEventListener('click', () => {
+    $conversationsSearch.value = '';
+    $conversationsSearchClear.hidden = true;
+    $conversationsSearch.focus();
+    renderConversationsList();
+  });
+}
+
+if ($markAllReadBtn) {
+  $markAllReadBtn.addEventListener('click', async () => {
+    $markAllReadBtn.disabled = true;
+    try {
+      await api.markAllRead();
+      // Clear the local cache's unread counts
+      for (const c of conversationsCache) c.unreadCount = 0;
+      renderConversationsList();
+      refreshUnreadCount();
+      showToast('All conversations marked as read', 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      $markAllReadBtn.disabled = false;
+    }
+  });
+}
+
+// Inbox context menu
+let contextMenuTarget = null;
+
+document.addEventListener('click', () => {
+  if ($inboxContextMenu) $inboxContextMenu.hidden = true;
+  contextMenuTarget = null;
+});
+
+$conversationsList.addEventListener('contextmenu', (e) => {
+  const row = e.target.closest('.conv-row');
+  if (!row || !$inboxContextMenu) return;
+  e.preventDefault();
+  contextMenuTarget = row;
+  const conv = conversationsCache.find((c) => {
+    const name = c.kind === 'peer' ? c.peer.username : c.group.name;
+    return row.querySelector('.conv-row__name')?.textContent?.trim() === name;
+  });
+  $inboxContextMenu.querySelector('[data-context-mark-read]')?.toggleAttribute('disabled', !conv || conv.unreadCount === 0);
+  $inboxContextMenu.style.left = `${Math.min(e.clientX, window.innerWidth - 170)}px`;
+  $inboxContextMenu.style.top = `${e.clientY}px`;
+  $inboxContextMenu.hidden = false;
+});
+
+$inboxContextMenu?.addEventListener('click', async (e) => {
+  const markReadBtn = e.target.closest('[data-context-mark-read]');
+  if (markReadBtn && contextMenuTarget) {
+    const name = contextMenuTarget.querySelector('.conv-row__name')?.textContent?.trim();
+    const conv = conversationsCache.find((c) => {
+      const n = c.kind === 'peer' ? c.peer.username : c.group.name;
+      return n === name;
+    });
+    if (conv) {
+      try {
+        const opts = conv.kind === 'peer' ? { peerId: conv.peer.id } : { groupId: conv.group.id };
+        await api.markConversationRead(opts);
+        await api.markMessagesRead(opts);
+        conv.unreadCount = 0;
+        renderConversationsList();
+        refreshUnreadCount();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    }
+  }
+  $inboxContextMenu.hidden = true;
+  contextMenuTarget = null;
+});
+
+// Ctrl/Cmd+F focuses the inbox search
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+    if (currentView === 'inbox' && $viewThread.hidden && $conversationsSearch) {
+      e.preventDefault();
+      $conversationsSearch.focus();
+    }
+  }
+  // Escape closes the context menu
+  if (e.key === 'Escape' && $inboxContextMenu && !$inboxContextMenu.hidden) {
+    $inboxContextMenu.hidden = true;
+    contextMenuTarget = null;
+  }
+});
+
+const SNIPPET_TYPE_LABEL = {
+  text:     '',
+  image:    '\ud83d\udcf7 Photo',
+  document: '\ud83d\udcce Document',
+  link:     '\ud83d\udd17 Link',
+  share:    '\ud83d\udce4 Shared a link',
+};
+
+function renderConversationRow(c, idx = 0) {
   const li = document.createElement('li');
   li.className = 'conv-row' + (c.unreadCount > 0 ? ' conv-row--unread' : '');
+  li.style.setProperty('--i', idx);
   const avatar = c.kind === 'peer'
     ? avatarHtml(c.peer.username, c.peer.avatarKey, 'md', c.peer.avatarUrl)
     : groupAvatarHtml(c.group, 'md');
@@ -906,7 +1120,10 @@ function renderConversationRow(c) {
   const groupTag = c.kind === 'group' ? '<span class="conv-row__tag">Group</span>' : '';
   const youPrefix = c.lastSenderId && currentUser && c.lastSenderId === currentUser.id
     ? '<span class="conv-row__you">You: </span>' : '';
-  const snippet = escapeHtml(truncate(c.lastSnippet || '', 64));
+  const typeLabel = SNIPPET_TYPE_LABEL[c.lastMessageType] || '';
+  const snippet = typeLabel
+    ? `<span class="conv-row__snippet-type">${typeLabel}</span>`
+    : escapeHtml(truncate(c.lastSnippet || '', 64));
   const time = c.lastAt ? timeAgo(c.lastAt) : '';
 
   li.innerHTML = `
@@ -1082,7 +1299,13 @@ function renderThreadMessages(items) {
     else if (e.type === 'share')   $threadMessages.appendChild(renderThreadMessage(e.share));
     else                           $threadMessages.appendChild(renderThreadReplyMessage(e.reply, e.parentShare));
   }
-  requestAnimationFrame(() => { $threadMessages.scrollTop = $threadMessages.scrollHeight; });
+  // Only smooth-scroll for new items (keep initial loads instant)
+  const isNewItem = events.length > 0 && ($threadMessages.children.length === 0 || events.length <= 2);
+  if (isNewItem) {
+    requestAnimationFrame(() => { $threadMessages.scrollTop = $threadMessages.scrollHeight; });
+  } else {
+    $threadMessages.scrollTo({ top: $threadMessages.scrollHeight, behavior: 'smooth' });
+  }
 }
 
 // Render a chat message bubble: text / link / image / document, with edit +
@@ -1098,12 +1321,20 @@ function renderChatMessage(m) {
   const senderAvatar = avatarHtml(m.sender.username, m.sender.avatarKey, 'sm', m.sender.avatarUrl);
 
   let bodyHtml;
+  // Detect reply quote prefix: "> @username: text\n\nactual message"
+  let replyQuoteHtml = '';
+  let cleanContent = m.content || '';
+  const replyMatch = cleanContent.match(/^>\s*@([^:]+):\s*(.+?)\n{2,}/s);
+  if (replyMatch) {
+    replyQuoteHtml = `<span class="reply-quote">↪ @${escapeHtml(replyMatch[1])}: ${linkifyText(replyMatch[2])}</span>`;
+    cleanContent = cleanContent.slice(replyMatch[0].length);
+  }
   if (m.deleted) {
     bodyHtml = `<p class="chat-msg__deleted">message deleted</p>`;
   } else if (m.messageType === 'image') {
     bodyHtml = `
       <img class="chat-msg__image" src="${escapeAttr(m.url)}" alt="${escapeAttr(m.fileName || 'image')}" data-lightbox="${escapeAttr(m.url)}" loading="lazy">
-      ${m.content ? `<p class="chat-msg__text">${linkifyText(m.content)}</p>` : ''}
+      ${cleanContent ? `<p class="chat-msg__text">${replyQuoteHtml}${linkifyText(cleanContent)}</p>` : replyQuoteHtml}
     `;
   } else if (m.messageType === 'document') {
     bodyHtml = `
@@ -1114,13 +1345,13 @@ function renderChatMessage(m) {
           ${m.fileSize ? `<span class="chat-msg__doc-size">${formatFileSize(m.fileSize)}</span>` : ''}
         </span>
       </a>
-      ${m.content ? `<p class="chat-msg__text">${linkifyText(m.content)}</p>` : ''}
+      ${cleanContent ? `<p class="chat-msg__text">${replyQuoteHtml}${linkifyText(cleanContent)}</p>` : replyQuoteHtml}
     `;
   } else if (m.messageType === 'link') {
     const preview = buildLinkPreview(m.url);
     const title = m.ogTitle || m.title || truncateUrl(m.url, 50);
     bodyHtml = `
-      ${m.content ? `<p class="chat-msg__text">${linkifyText(m.content)}</p>` : ''}
+      ${cleanContent ? `<p class="chat-msg__text">${replyQuoteHtml}${linkifyText(cleanContent)}</p>` : replyQuoteHtml}
       <a class="chat-msg__link-card" href="${escapeAttr(m.url)}" target="_blank" rel="noopener">
         ${m.ogImage ? `<img class="chat-msg__link-img" src="${escapeAttr(m.ogImage)}" alt="" loading="lazy">` : ''}
         <span class="chat-msg__link-body">
@@ -1132,16 +1363,34 @@ function renderChatMessage(m) {
       </a>
     `;
   } else {
-    bodyHtml = `<p class="chat-msg__text">${linkifyText(m.content || '')}</p>`;
+    bodyHtml = `<p class="chat-msg__text">${replyQuoteHtml}${linkifyText(cleanContent)}</p>`;
   }
 
   const editable = mine && !m.deleted &&
     (Date.now() - new Date(m.createdAt).getTime() < 24 * 3600 * 1000);
-  const actionsHtml = !m.deleted ? `
-    <div class="chat-msg__actions">
-      <button class="chat-msg__action" data-save-message="${escapeAttr(m.id)}" title="Save to your archive">Save</button>
-      ${editable && m.messageType === 'text' ? `<button class="chat-msg__action" data-edit-message="${escapeAttr(m.id)}" title="Edit">Edit</button>` : ''}
-      ${mine ? `<button class="chat-msg__action" data-delete-message="${escapeAttr(m.id)}" title="Delete">Delete</button>` : ''}
+  const menuHtml = !m.deleted ? `
+    <div class="chat-msg__menu">
+      <button class="chat-msg__menu-btn" data-menu-toggle="${escapeAttr(m.id)}" title="More" aria-label="More actions">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+      </button>
+      <div class="chat-msg__menu-dropdown" data-menu="${escapeAttr(m.id)}">
+        <button class="chat-msg__menu-item" data-reply-message="${escapeAttr(m.id)}" data-reply-author="${escapeAttr(m.sender.username)}">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+          Reply
+        </button>
+        <button class="chat-msg__menu-item" data-save-message="${escapeAttr(m.id)}">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+          Save
+        </button>
+        ${editable && m.messageType === 'text' ? `<button class="chat-msg__menu-item" data-edit-message="${escapeAttr(m.id)}">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+          Edit
+        </button>` : ''}
+        ${mine ? `<button class="chat-msg__menu-item chat-msg__menu-item--danger" data-delete-message="${escapeAttr(m.id)}">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+          Delete
+        </button>` : ''}
+      </div>
     </div>` : '';
 
   const statusHtml = (mine && !m.deleted) ? `<span class="chat-msg__status">${receiptLabel(m)}</span>` : '';
@@ -1154,11 +1403,11 @@ function renderChatMessage(m) {
         ${mine ? '' : `<span class="chat-msg__sender">${escapeHtml(m.sender.username)}${creatorBadge(m.sender.id)}</span>`}
         ${bodyHtml}
         <span class="chat-msg__meta">
-          <span class="chat-msg__time">${time}${editedHtml}</span>
           ${statusHtml}
+          <span class="chat-msg__time">${time}${editedHtml}</span>
         </span>
-        ${actionsHtml}
       </div>
+      ${menuHtml}
     </div>
   `;
   return wrapper;
@@ -1654,10 +1903,12 @@ $threadBack.addEventListener('click', () => {
 
 let composerAttachment = null; // { messageType, filePath, url, fileName, fileSize, mimeType }
 let composerEditingId  = null; // message id being edited, or null
+let composerReplyTo    = null; // { id, username, content } when replying to a message
 
 function resetComposer() {
   composerAttachment = null;
   composerEditingId  = null;
+  composerReplyTo    = null;
   if ($composerInput) {
     $composerInput.value = '';
     $composerInput.style.height = '';
@@ -1666,7 +1917,34 @@ function resetComposer() {
     $composerAttachment.hidden = true;
     $composerAttachment.innerHTML = '';
   }
+  renderComposerReplyIndicator();
   refreshComposerState();
+}
+
+function renderComposerReplyIndicator() {
+  let el = document.getElementById('composer-reply-indicator');
+  if (!composerReplyTo) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'composer-reply-indicator';
+    el.className = 'composer__reply-indicator';
+    $composer.insertBefore(el, $composer.firstChild);
+  }
+  const previewText = (composerReplyTo.content || '').slice(0, 80);
+  el.innerHTML = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+    <strong>${escapeHtml(composerReplyTo.username)}</strong>
+    <span class="composer__reply-indicator-preview">${escapeHtml(previewText)}${composerReplyTo.content && composerReplyTo.content.length > 80 ? '…' : ''}</span>
+    <button class="composer__reply-indicator-cancel" data-cancel-reply type="button" title="Cancel reply">&times;</button>
+  `;
+  el.querySelector('[data-cancel-reply]').addEventListener('click', () => {
+    composerReplyTo = null;
+    renderComposerReplyIndicator();
+    $composerInput.focus();
+  });
 }
 
 function refreshComposerState() {
@@ -1764,11 +2042,17 @@ $composer.addEventListener('submit', async (e) => {
     : { groupId: currentThread.group.id };
 
   $composerSend.disabled = true;
+  $composerSend.classList.add('composer__send--sending');
   try {
+    // When replying, prefix content with a quote of the original message
+    const replyPrefix = composerReplyTo
+      ? `> @${composerReplyTo.username}: ${composerReplyTo.content}\n\n`
+      : '';
+    const fullText = replyPrefix + text;
     if (attachment) {
       await api.sendMessage({
         ...target,
-        content:     text || undefined,
+        content:     fullText || undefined,
         messageType: attachment.messageType,
         url:         attachment.url,
         filePath:    attachment.filePath,
@@ -1780,24 +2064,67 @@ $composer.addEventListener('submit', async (e) => {
       const preview = buildLinkPreview(text);
       await api.sendMessage({
         ...target,
+        content:     replyPrefix || undefined,
         messageType: 'link',
         url:         text,
         platform:    preview.platform?.id || undefined,
         title:       preview.sublabel || undefined,
       });
     } else {
-      await api.sendMessage({ ...target, content: text, messageType: 'text' });
+      await api.sendMessage({ ...target, content: fullText, messageType: 'text' });
     }
+    $composerSend.classList.remove('composer__send--sending');
+    $composerSend.classList.add('composer__send--sent');
+    setTimeout(() => $composerSend.classList.remove('composer__send--sent'), 400);
     resetComposer();
     loadThread(currentThread);
   } catch (err) {
+    $composerSend.classList.remove('composer__send--sending');
     showToast(err.message, 'error');
     refreshComposerState();
   }
 });
 
-// Edit / delete a chat message, or open an image lightbox (delegated).
+// Edit / delete / reply / save a chat message, or open an image lightbox (delegated).
 $threadMessages.addEventListener('click', (e) => {
+  const menuBtn = e.target.closest('[data-menu-toggle]');
+  if (menuBtn) {
+    const id = menuBtn.getAttribute('data-menu-toggle');
+    const menu = document.querySelector(`[data-menu="${id}"]`);
+    if (!menu) return;
+    const isOpen = menu.classList.toggle('chat-msg__menu-dropdown--open');
+    if (isOpen) {
+      // Close other open menus
+      document.querySelectorAll('.chat-msg__menu-dropdown--open').forEach((m) => {
+        if (m !== menu) m.classList.remove('chat-msg__menu-dropdown--open');
+      });
+      const closeMenu = (ev) => {
+        if (!ev.target.closest('[data-menu-toggle]') && !ev.target.closest('[data-menu]')) {
+          menu.classList.remove('chat-msg__menu-dropdown--open');
+          document.removeEventListener('click', closeMenu);
+        }
+      };
+      setTimeout(() => document.addEventListener('click', closeMenu), 0);
+    }
+    return;
+  }
+
+  const replyBtn = e.target.closest('[data-reply-message]');
+  if (replyBtn) {
+    const id = replyBtn.getAttribute('data-reply-message');
+    const author = replyBtn.getAttribute('data-reply-author');
+    const bubble = document.getElementById(`message-${id}`);
+    const textEl = bubble && bubble.querySelector('.chat-msg__text');
+    composerReplyTo = { id, username: author, content: textEl ? textEl.textContent : '' };
+    resetComposer();
+    composerReplyTo = { id, username: author, content: textEl ? textEl.textContent : '' };
+    renderComposerReplyIndicator();
+    $composerInput.focus();
+    // Close open menus
+    document.querySelectorAll('.chat-msg__menu-dropdown--open').forEach((m) => m.classList.remove('chat-msg__menu-dropdown--open'));
+    return;
+  }
+
   const editBtn = e.target.closest('[data-edit-message]');
   if (editBtn) {
     const id = editBtn.getAttribute('data-edit-message');
@@ -1808,12 +2135,17 @@ $threadMessages.addEventListener('click', (e) => {
     $composerInput.focus();
     autoGrowComposer();
     refreshComposerState();
+    // Close open menus
+    document.querySelectorAll('.chat-msg__menu-dropdown--open').forEach((m) => m.classList.remove('chat-msg__menu-dropdown--open'));
     return;
   }
   const delBtn = e.target.closest('[data-delete-message]');
   if (delBtn) {
     api.deleteMessage(delBtn.getAttribute('data-delete-message'))
-      .then(() => loadThread(currentThread))
+      .then(() => {
+        loadThread(currentThread);
+        if (currentView === 'inbox') loadConversations();
+      })
       .catch((err) => showToast(err.message, 'error'));
     return;
   }
@@ -2005,6 +2337,7 @@ async function loadFriends() {
             <span class="friend-row__name">${escapeHtml(req.user.username)}${creatorBadge(req.user.id)}</span>
           </div>
           <div class="friend-row__actions">
+            <button class="btn btn--sm btn--ghost" data-decline="${escapeAttr(req.id)}">Decline</button>
             <button class="btn btn--sm btn--primary" data-accept="${escapeAttr(req.id)}">Accept</button>
           </div>
         `;
@@ -2024,7 +2357,10 @@ async function loadFriends() {
             ${avatarHtml(req.user.username, req.user.avatarKey, 'sm', req.user.avatarUrl)}
             <span class="friend-row__name">${escapeHtml(req.user.username)}${creatorBadge(req.user.id)}</span>
           </div>
-          <span class="friend-row__status">Pending</span>
+          <div class="friend-row__actions">
+            <span class="friend-row__status">Pending</span>
+            <button class="btn btn--sm btn--ghost" data-cancel="${escapeAttr(req.id)}" title="Cancel request">Cancel</button>
+          </div>
         `;
         $outgoingList.appendChild(li);
       });
@@ -2159,26 +2495,57 @@ $addFriendResults.addEventListener('click', async (e) => {
   }
 });
 
-// --- Accept friend request ---
+// --- Accept / decline friend request ---
 
 $pendingList.addEventListener('click', async (e) => {
-  const btn = e.target.closest('[data-accept]');
+  const acceptBtn  = e.target.closest('[data-accept]');
+  const declineBtn = e.target.closest('[data-decline]');
+  const btn = acceptBtn || declineBtn;
   if (!btn) return;
 
-  const friendshipId = btn.dataset.accept;
-  btn.disabled = true;
+  const friendshipId = btn.dataset.accept || btn.dataset.decline;
+  const row = btn.closest('.friend-row');
+  if (row) row.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+  const originalText = btn.textContent;
   btn.textContent = '...';
 
   try {
-    await api.acceptFriend(friendshipId);
-    showToast('Friend added!', 'success');
-    loadFriends(); // Refresh the whole list
+    if (acceptBtn) {
+      await api.acceptFriend(friendshipId);
+      showToast('Friend added!', 'success');
+    } else {
+      await api.declineFriend(friendshipId);
+      showToast('Request declined', 'success');
+    }
+    loadFriends();
   } catch (err) {
     showToast(err.message, 'error');
-    btn.disabled = false;
-    btn.textContent = 'Accept';
+    if (row) row.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+    btn.textContent = originalText;
   }
 });
+
+// --- Cancel outgoing friend request ---
+
+if ($outgoingList) {
+  $outgoingList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-cancel]');
+    if (!btn) return;
+    const friendshipId = btn.dataset.cancel;
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = '...';
+    try {
+      await api.declineFriend(friendshipId);
+      showToast('Request cancelled', 'success');
+      loadFriends();
+    } catch (err) {
+      showToast(err.message, 'error');
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+}
 
 // ============================================================
 //  EXTERNAL LINK CAPTURE → FRIEND PICKER → SHARE
@@ -2465,14 +2832,15 @@ function closeStartConvPicker() {
 function startConversationWith(user) {
   closeStartConvPicker();
   openConversation({
-    kind:         'peer',
-    peer:         { id: user.id, username: user.username, avatarKey: user.avatarKey, avatarUrl: user.avatarUrl },
-    group:        null,
-    lastShareId:  null,
-    lastSnippet:  '',
-    lastSenderId: null,
-    lastAt:       null,
-    unreadCount:  0,
+    kind:            'peer',
+    peer:            { id: user.id, username: user.username, avatarKey: user.avatarKey, avatarUrl: user.avatarUrl },
+    group:           null,
+    lastShareId:     null,
+    lastSnippet:     '',
+    lastMessageType: null,
+    lastSenderId:    null,
+    lastAt:          null,
+    unreadCount:     0,
   });
 }
 
@@ -3233,11 +3601,36 @@ $groupEditorSave.addEventListener('click', async () => {
     );
     const newlyAdded = [...groupEditorMembers].filter((id) => !existingMemberIds.has(id));
     await api.setGroupMembers(groupId, [...groupEditorMembers]);
-    const toastMsg = newlyAdded.length > 0
-      ? (editingGroup ? `Invites sent to ${newlyAdded.length} friend${newlyAdded.length === 1 ? '' : 's'}`
-                      : `Group created — ${newlyAdded.length} invite${newlyAdded.length === 1 ? '' : 's'} sent`)
-      : (editingGroup ? 'Group saved' : 'Group created');
-    showToast(toastMsg, 'success');
+
+    // set_group_members silently skips non-friends and existing invites, so
+    // we can't trust newlyAdded.length. Verify by checking what the server
+    // *actually* has as pending invites for this group.
+    let actualPending = newlyAdded.length;
+    if (newlyAdded.length > 0) {
+      try {
+        const pending = await api.listGroupInvitations(groupId);
+        const pendingIds = new Set((pending.invitations || []).map((p) => p.invitee?.id));
+        actualPending = newlyAdded.filter((id) => pendingIds.has(id)).length;
+      } catch {
+        // Ignore — fall back to optimistic count
+      }
+    }
+
+    let toastMsg;
+    let toastKind = 'success';
+    if (newlyAdded.length === 0) {
+      toastMsg = editingGroup ? 'Group saved' : 'Group created';
+    } else if (actualPending === 0) {
+      toastMsg = 'No invites sent — make sure they\'re still friends';
+      toastKind = 'error';
+    } else if (actualPending < newlyAdded.length) {
+      toastMsg = `${actualPending} of ${newlyAdded.length} invites sent (others skipped)`;
+    } else {
+      toastMsg = editingGroup
+        ? `Invites sent to ${actualPending} friend${actualPending === 1 ? '' : 's'}`
+        : `Group created — ${actualPending} invite${actualPending === 1 ? '' : 's'} sent`;
+    }
+    showToast(toastMsg, toastKind);
     closeGroupEditor();
     loadGroups();
   } catch (err) {

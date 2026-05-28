@@ -56,7 +56,7 @@ let refreshPromise = null;
  * Refresh the access token using the refresh token.
  * De-duplicated: parallel callers all await the same in-flight refresh.
  */
-async function refreshSession() {
+export async function refreshSession() {
   if (refreshPromise) return refreshPromise;
 
   refreshPromise = (async () => {
@@ -422,6 +422,18 @@ export const api = {
     return { friendship: updated[0] };
   },
 
+  // Decline an incoming friend request, or cancel an outgoing one — both
+  // resolve by deleting the friendships row. RLS allows DELETE for either
+  // participant (friendships_delete_participant policy). Symmetric so callers
+  // don't need to know which side they're on; the same row id works.
+  async declineFriend(friendshipId) {
+    await request(
+      `/rest/v1/friendships?id=eq.${friendshipId}`,
+      { method: 'DELETE' }
+    );
+    return { ok: true };
+  },
+
   async getPendingCount() {
     const count = await rpc('pending_friend_request_count');
     return { count: count || 0 };
@@ -456,8 +468,9 @@ export const api = {
         peer:         r.kind === 'peer'  ? { id: r.peer_id,  username: r.peer_username,  avatarKey: r.peer_avatar_key, avatarUrl: r.peer_avatar_url  } : null,
         group:        r.kind === 'group' ? { id: r.group_id, name: r.group_name, color: r.group_color, avatarKey: r.group_avatar_key, avatarUrl: r.group_avatar_url } : null,
         lastShareId:  r.last_share_id,
-        lastSnippet:  r.last_snippet,
-        lastSenderId: r.last_sender_id,
+        lastSnippet:      r.last_snippet,
+        lastMessageType:  r.last_message_type,
+        lastSenderId:     r.last_sender_id,
         lastAt:       r.last_at,
         unreadCount:  r.unread_count || 0,
       })),
@@ -592,6 +605,11 @@ export const api = {
     return { message: 'Delivered' };
   },
 
+  async markAllRead() {
+    await rpc('mark_all_messages_read');
+    return { message: 'Read' };
+  },
+
   // Compress images, upload images/documents (no video) to the public
   // chat-uploads bucket, and return what sendMessage needs.
   async uploadMessageFile(file) {
@@ -702,24 +720,25 @@ export const api = {
     return { unread: (shares || 0) + (messages || 0) };
   },
 
-  // Clears the current user's *incoming* messages only.
+  // Clears the user's inbox by stamping profiles.inbox_cleared_at = now().
   //
-  // Drops every share_recipients row where the user is the recipient — those
-  // shares disappear from their inbox. Sent shares are left alone, so the
-  // people the user has shared with still see them, and a reply from any of
-  // those recipients will surface the conversation again.
-  //
-  // RLS (`share_recipients_delete_participant`) gates the delete to the
-  // user's own recipient rows.
-  async clearChatHistory() {
-    const { user } = await getAuth();
-    if (!user) throw new Error('Not signed in');
-    await request(
-      `/rest/v1/share_recipients?recipient_id=eq.${user.id}`,
-      { method: 'DELETE' }
-    );
+  // get_conversations + unread counters filter to last_at > inbox_cleared_at,
+  // so every share/message older than the click vanishes from this user's
+  // view. Sent items remain visible to their recipients, and a reply
+  // (which is newer than the cursor) re-surfaces the conversation. Nothing
+  // is destroyed — the operation is reversible if you ever zero the column.
+  async clearInbox() {
+    await rpc('clear_inbox');
     return { message: 'Inbox cleared' };
   },
+  // Undo a Clear by zeroing the cursor — everything that was hidden returns
+  // exactly as it was. Surfaced as the Undo button on the post-clear toast.
+  async undoClearInbox() {
+    await rpc('undo_clear_inbox');
+    return { message: 'Inbox restored' };
+  },
+  // Back-compat alias for any caller still using the old name.
+  async clearChatHistory() { return this.clearInbox(); },
 
   // ---- Bookmarks (personal archive) ----
 

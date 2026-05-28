@@ -211,26 +211,27 @@ function showTaniaBubble() {
     .bubble {
       width: 56px;
       height: 56px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, #6366f1, #4f46e5);
-      color: #fff;
+      border-radius: 16px;
+      background: transparent;
       cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      display: block;
       box-shadow: 0 4px 20px rgba(99,102,241,0.4);
       transition: transform 0.2s ease, box-shadow 0.2s ease;
       animation: bubbleIn 0.3s ease;
+      overflow: hidden;
     }
     .bubble:hover {
       transform: scale(1.1);
       box-shadow: 0 6px 28px rgba(99,102,241,0.55);
     }
-    .bubble svg {
-      width: 28px;
-      height: 28px;
+    .bubble img {
+      width: 100%;
+      height: 100%;
       display: block;
-      color: #fff;
+      object-fit: contain;
+      -webkit-user-drag: none;
+      user-select: none;
+      pointer-events: none;
     }
     @keyframes bubbleIn {
       from { opacity: 0; transform: scale(0.5) translateY(12px); }
@@ -245,10 +246,10 @@ function showTaniaBubble() {
 
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
-  bubble.innerHTML = `<svg viewBox="0 0 48 48" width="28" height="28">
-    <rect x="2" y="2" width="44" height="44" rx="10" fill="#fff"/>
-    <text x="24" y="33" text-anchor="middle" font-family="system-ui,sans-serif" font-size="28" font-weight="800" fill="#6366f1">T</text>
-  </svg>`;
+  const logo = document.createElement('img');
+  logo.src = chrome.runtime.getURL('icons/icon-128.png');
+  logo.alt = 'Tania';
+  bubble.appendChild(logo);
 
   bubbleRoot.appendChild(style);
   bubbleRoot.appendChild(bubble);
