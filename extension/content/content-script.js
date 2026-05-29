@@ -209,9 +209,9 @@ function showTaniaBubble() {
       user-select: none;
     }
     .bubble {
-      width: 56px;
-      height: 56px;
-      border-radius: 16px;
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
       background: transparent;
       cursor: pointer;
       display: block;

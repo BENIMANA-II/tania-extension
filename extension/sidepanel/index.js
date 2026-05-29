@@ -41,7 +41,7 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', app
 
 
 import { api, getAuth, setAuth, clearAuth, refreshSession } from '../shared/api.js';
-import { isValidUrl, buildLinkPreview } from './lib/link-utils.js';
+import { isValidUrl, extractUrl, buildLinkPreview } from './lib/link-utils.js';
 import { AVATAR_PRESETS, avatarHtml } from './lib/avatars.js';
 import {
   subscribeToConversation,
@@ -2560,6 +2560,73 @@ document.addEventListener('paste', (e) => {
   const text = e.clipboardData.getData('text/plain').trim();
   if (!isValidUrl(text)) return;
   openPicker(text);
+});
+
+// --- Drag & drop a link onto the panel → open the share picker ---
+// Mirrors the paste flow: a URL dragged in from another tab, the address bar,
+// or a page link drops you straight into "Share with…" so you can start a
+// chat around it. We only react to drags that carry text/URI data (never
+// files) and only while signed in, so nothing fires over the loader/login.
+const $dropOverlay = document.createElement('div');
+$dropOverlay.className = 'drop-overlay';
+$dropOverlay.hidden = true;
+$dropOverlay.innerHTML = `
+  <div class="drop-overlay__card">
+    <svg class="drop-overlay__icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    <p class="drop-overlay__text">Drop the link to share</p>
+  </div>
+`;
+document.body.appendChild($dropOverlay);
+
+// A drag that carries a link exposes one of these in dataTransfer.types.
+// (getData() is blocked during dragenter/over, so we sniff types instead.)
+function dragHasLink(e) {
+  const t = e.dataTransfer && e.dataTransfer.types;
+  if (!t) return false;
+  return Array.from(t).some((type) => type === 'text/uri-list' || type === 'text/plain');
+}
+
+// Count enter/leave so moving across child elements doesn't flicker the overlay.
+let dragDepth = 0;
+
+function hideDropOverlay() {
+  dragDepth = 0;
+  $dropOverlay.hidden = true;
+}
+
+document.addEventListener('dragenter', (e) => {
+  if (!dragHasLink(e)) return;
+  // Always prevent default so a stray drop can't navigate the panel away from
+  // the app to the dropped URL. Only surface the overlay when signed in.
+  e.preventDefault();
+  if (!currentUser) return;
+  dragDepth += 1;
+  $dropOverlay.hidden = false;
+});
+
+document.addEventListener('dragover', (e) => {
+  if (!dragHasLink(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = currentUser ? 'copy' : 'none';
+});
+
+document.addEventListener('dragleave', (e) => {
+  if ($dropOverlay.hidden) return;
+  dragDepth -= 1;
+  if (dragDepth <= 0) hideDropOverlay();
+});
+
+document.addEventListener('drop', (e) => {
+  if (!dragHasLink(e)) return;
+  e.preventDefault(); // stop the browser from opening the dropped URL
+  hideDropOverlay();
+  if (!currentUser) return;
+  const url = extractUrl(e.dataTransfer);
+  if (url) {
+    openPicker(url);
+  } else {
+    showToast("That doesn't look like a link", 'error');
+  }
 });
 
 chrome.runtime.onMessage.addListener((message) => {
